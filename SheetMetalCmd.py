@@ -1899,8 +1899,8 @@ class SMBendWall:
                 LengthList, bendAList = getSketchDetails(fp.Sketch, fp.sketchflip, fp.sketchinvert,
                                                          fp.radius.Value, thk)
             else:
-                if fp.Sketch.Support:
-                    fp.baseObject = (fp.Sketch.Support[0][0], fp.Sketch.Support[0][1])
+                if fp.Sketch.AttachmentSupport:
+                    fp.baseObject = (fp.Sketch.AttachmentSupport[0][0], fp.Sketch.AttachmentSupport[0][1])
                 LengthList = [10.0]
         fp.LengthList = LengthList
         fp.bendAList = bendAList
