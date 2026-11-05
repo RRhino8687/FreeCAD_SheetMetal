@@ -186,6 +186,43 @@ class TestWallShape(FeatureTestCase):
                 self.assertEqual(sketch.solve(), 0)
                 self.assertValidSheet(wall)
 
+    def test_stale_frame_from_an_older_file(self):
+        """Edit Shape uses the wall as it is now, not the frame a file stored.
+
+        A wall loaded from a file isn't recomputed until something changes,
+        so its stored frame can come from older code.
+        """
+        wall = add_wall(self.doc, self.plate)
+        stale = FreeCAD.Placement(Vector(0, 0, 0), FreeCAD.Rotation(Vector(0, 0, 1), 180))
+        wall.ShapeFrame = stale
+        sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
+        normal = sketch.getGlobalPlacement().Rotation.multVec(Vector(0, 0, 1))
+        self.assertGreater(normal.dot(Vector(-1, 0, 0)), 0.999, f"normal {normal}")
+        wall.ShapeFrame = stale
+        SheetMetalCmd.smRefreshWallShapeTilt(wall)
+        self.doc.recompute()
+        normal = sketch.getGlobalPlacement().Rotation.multVec(Vector(0, 0, 1))
+        self.assertGreater(normal.dot(Vector(-1, 0, 0)), 0.999, f"after refresh {normal}")
+
+    def test_sketch_stays_put_when_the_viewing_side_changes(self):
+        """Invert changes which side the sketch is seen from, but never mirrors it.
+
+        The sketch's direction along the edge depends only on the face the edge
+        was picked on, not on which way the wall bends.
+        """
+        wall = add_wall(self.doc, self.plate, gap1=5.0, gap2=20.0)
+        sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
+        before = upper_part(wall).BoundBox
+        wall.invert = True
+        self.doc.recompute()
+        SheetMetalCmd.smRefreshWallShapeTilt(wall)
+        self.doc.recompute()
+        self.assertValidSheet(wall)
+        self.assertEqual(sketch.solve(), 0)
+        lower = wall.Shape.common(Part.makeBox(200, 400, 200, Vector(-50, -150, -210))).BoundBox
+        self.assertAlmostEqual(lower.YMin, before.YMin, places=3)
+        self.assertAlmostEqual(lower.YMax, before.YMax, places=3)
+
     def test_custom_outlines(self):
         """Each outline gives the volume its flat pattern says, and a valid solid.
 

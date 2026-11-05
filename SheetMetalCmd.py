@@ -2445,6 +2445,10 @@ def smRefreshWallShapeTilt(wall):
     sketch = wall.ShapeSketch
     if sketch is None:
         return
+    # The frame is only written when the wall recomputes, and a wall from a
+    # file that hasn't changed isn't recomputed: force it, so the frame comes
+    # from the current code and geometry.
+    wall.recompute()
     target = wall.ShapeFrame
     if sketch.MapMode == "Deactivated":
         if not sketch.Placement.isSame(target, 1e-9):
@@ -2480,8 +2484,7 @@ def smCreateWallShapeSketch(wall):
     import Sketcher
 
     doc = wall.Document
-    if wall.ShapeFrame.isIdentity():
-        wall.recompute()  # an older wall that hasn't stored its frame yet
+    wall.recompute()  # the stored frame may be stale (see smRefreshWallShapeTilt)
     base, edge, edgeName = smWallAttachmentEdge(wall)
     edgeDir = edge.valueAt(edge.LastParameter) - edge.valueAt(edge.FirstParameter)
     backwards = wall.ShapeFrame.Rotation.multVec(FreeCAD.Vector(1, 0, 0)).dot(edgeDir) < 0
