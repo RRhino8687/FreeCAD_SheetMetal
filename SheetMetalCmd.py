@@ -2449,7 +2449,11 @@ def smRefreshWallShapeTilt(wall):
     # file that hasn't changed isn't recomputed: force it, so the frame comes
     # from the current code and geometry.
     wall.recompute()
-    target = wall.ShapeFrame
+    _smPlaceShapeSketch(sketch, wall.ShapeFrame)
+
+
+def _smPlaceShapeSketch(sketch, target):
+    """Set the AttachmentOffset (or Placement) that puts the sketch at `target`."""
     if sketch.MapMode == "Deactivated":
         if not sketch.Placement.isSame(target, 1e-9):
             sketch.Placement = target
@@ -2485,6 +2489,7 @@ def smCreateWallShapeSketch(wall):
 
     doc = wall.Document
     wall.recompute()  # the stored frame may be stale (see smRefreshWallShapeTilt)
+    frame = wall.ShapeFrame
     base, edge, edgeName = smWallAttachmentEdge(wall)
     edgeDir = edge.valueAt(edge.LastParameter) - edge.valueAt(edge.FirstParameter)
     backwards = wall.ShapeFrame.Rotation.multVec(FreeCAD.Vector(1, 0, 0)).dot(edgeDir) < 0
@@ -2493,9 +2498,10 @@ def smCreateWallShapeSketch(wall):
     if body is not None:
         body.insertObject(sketch, wall, False)
     smAttachWallShapeSketch(sketch, wall, backwards)
-    wall.ShapeSketch = sketch
+    # Link the sketch to the wall only once it's drawn (at the end), or the
+    # wall would recompute against an empty sketch.
     sketch.recompute()
-    smRefreshWallShapeTilt(wall)
+    _smPlaceShapeSketch(sketch, frame)
     sketch.recompute()
     sketch.addExternal(base.Name, edgeName)
     external = -2 - len(sketch.ExternalGeometry)  # external geometry counts down from -3
@@ -2582,6 +2588,7 @@ def smCreateWallShapeSketch(wall):
             name(con(Sketcher.Constraint("DistanceX", point, 1, side, pos, ext2)), label)
 
     sketch.Visibility = False
+    wall.ShapeSketch = sketch
     doc.recompute()
     return sketch
 

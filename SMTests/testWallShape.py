@@ -148,6 +148,29 @@ class TestWallShape(FeatureTestCase):
                 # The bend is wrapped from B-splines, so allow a tiny volume difference.
                 self.assertAlmostEqual(wall.Shape.Volume, plain.Volume, delta=plain.Volume * 1e-4)
 
+    def test_making_the_starting_sketch_reports_no_errors(self):
+        """Edit Shape never builds the wall from a half-made sketch."""
+        errors = []
+        original = SheetMetalCmd.SMWallShape.__init__
+
+        def recording(shape, sketch):
+            try:
+                original(shape, sketch)
+            except Exception as error:
+                errors.append(str(error))
+                raise
+
+        SheetMetalCmd.SMWallShape.__init__ = recording
+        try:
+            wall = add_wall(self.doc, self.plate, gap1=5.0, extend1=2.0)
+            SheetMetalCmd.smCreateWallShapeSketch(wall)
+            SheetMetalCmd.smRefreshWallShapeTilt(wall)
+            self.doc.recompute()
+        finally:
+            SheetMetalCmd.SMWallShape.__init__ = original
+        self.assertEqual(errors, [])
+        self.assertValidSheet(wall)
+
     def test_starting_sketch_stands_on_the_wall(self):
         """Edit Shape shows the sketch on the wall's flat part (ADR 0001)."""
         for label, props in [("90", {}), ("45", {"angle": 45.0}), ("135", {"angle": 135.0}),
