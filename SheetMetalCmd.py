@@ -2629,7 +2629,10 @@ def smCreateWallShapeSketch(wall):
     bake1, bake2 = miter1 < -smEpsilon, miter2 < -smEpsilon
     slant1 = (height - setback) * math.tan(math.radians(miter1)) if bake1 else 0.0
     slant2 = (height - setback) * math.tan(math.radians(miter2)) if bake2 else 0.0
-    ext1, ext2 = max(ext1, 0.0), max(ext2, 0.0)
+    # A drawn-in side takes its Extend into the sketch too, so the wall
+    # doesn't apply a negative one again; elsewhere only Extend >= 0 is drawn.
+    ext1 = ext1 if bake1 else max(ext1, 0.0)
+    ext2 = ext2 if bake2 else max(ext2, 0.0)
     bend1, bend2 = gap1, length - gap2
     side1, side2 = gap1 - ext1, length - gap2 + ext2
     # A plain side's loose end sits on the reference line; Extend then works
@@ -2691,9 +2694,11 @@ def smCreateWallShapeSketch(wall):
                 con(Sketcher.Constraint("Horizontal", step))
                 con(Sketcher.Constraint("Vertical", point, 1, step, 1))
         if pos == 1:
-            name(con(Sketcher.Constraint("DistanceX", side, pos, point, 1, ext1)), label)
+            index = con(Sketcher.Constraint("DistanceX", side, pos, point, 1, ext1))
         else:
-            name(con(Sketcher.Constraint("DistanceX", point, 1, side, pos, ext2)), label)
+            index = con(Sketcher.Constraint("DistanceX", point, 1, side, pos, ext2))
+        if plain:  # a drawn-in side's Extend is the sketch's, not the panel's
+            name(index, label)
 
     # Keep the labels apart, below the reference line: Extend dimensions
     # first, Gap ones further down (both are often 0 and would sit on top of
@@ -2703,10 +2708,10 @@ def smCreateWallShapeSketch(wall):
         index = named.get(label)
         if index is not None:
             sketch.setLabelDistance(index, rank * spacing)
-    for baked, prop in ((bake1, "miterangle2" if backwards else "miterangle1"),
-                        (bake2, "miterangle1" if backwards else "miterangle2")):
+    for baked, side in ((bake1, "2" if backwards else "1"), (bake2, "1" if backwards else "2")):
         if baked:
-            setattr(wall, prop, 0.0)
+            setattr(wall, "miterangle" + side, 0.0)
+            setattr(wall, "extend" + side, 0.0)
     sketch.Visibility = False
     wall.ShapeSketch = sketch
     doc.recompute()

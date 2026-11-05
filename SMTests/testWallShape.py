@@ -134,6 +134,8 @@ class TestWallShape(FeatureTestCase):
             ("miter and negative Extend", {"AutoMiter": False, "miterangle2": 15.0,
                                            "gap2": 6.0, "extend2": -3.0}),
             ("negative (widening) miter", {"AutoMiter": False, "miterangle1": -15.0}),
+            ("negative miter and negative Extend", {"AutoMiter": False, "miterangle1": -15.0,
+                                                    "gap1": 5.0, "extend1": -2.0}),
         ]
         for label, props in cases:
             with self.subTest(label):
