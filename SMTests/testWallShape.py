@@ -452,6 +452,27 @@ class TestWallShape(FeatureTestCase):
             tops.append(wall.Shape.BoundBox.ZMax)
         self.assertAlmostEqual(tops[0], tops[1], places=3)
 
+    def test_length_spec_adds_no_seams(self):
+        """Every Length Spec gives the wall the same faces as Leg.
+
+        A setback puts the reference line inside the bend in the flat pattern,
+        so a loose end on it meets its closing line partway along a bend end.
+        That bend end must still be one face, not two with a seam between.
+        """
+        chains = [
+            ("one end dragged past the corner (Creo)",
+             [(-5, 12), (-5, 20), (100, 20), (100, 0)]),
+            ("notched, other end dragged",
+             [(-5, 12), (-5, 20), (80, 20), (80, 12), (100, 12), (100, 0)]),
+        ]
+        for label, chain in chains:
+            leg = len(self.shaped_wall(chain).Shape.Faces)
+            for spec in ("Outer Sharp", "Inner Sharp", "Tangential"):
+                with self.subTest(label, LengthSpec=spec):
+                    wall = self.shaped_wall(chain, LengthSpec=spec)
+                    self.assertValidSheet(wall)
+                    self.assertEqual(len(wall.Shape.Faces), leg, "face count")
+
     def test_wall_follows_a_shorter_edge(self):
         """The starting sketch's right side follows the far end of the edge (Q16)."""
         wall = add_wall(self.doc, self.plate, gap2=5.0, extend2=2.0)

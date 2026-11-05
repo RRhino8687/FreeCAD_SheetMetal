@@ -1399,7 +1399,47 @@ class SMWallShape:
                 "SheetMetal", "The shape sketch crosses itself or its closing lines."))
         # Anything below the bend's start would lie on the sheet: ignore it.
         box = face.BoundBox
-        return self._band(face, box.XMin - 1, box.XMax + 1, 0.0, box.YMax + 1)
+        outline = self._band(face, box.XMin - 1, box.XMax + 1, 0.0, box.YMax + 1)
+        return Part.makeCompound([self._joinStraightRuns(f) for f in outline.Faces])
+
+    @staticmethod
+    def _joinStraightRuns(face):
+        """The face with each run of edges along one straight line made one edge.
+
+        A loose end on the reference line meets its closing line in a straight
+        run, and with a setback that joint lies partway along a bend end.
+        bend_solid gives every edge its own end face, so the joint would show
+        as a seam with a sliver beside it.
+        """
+        if len(face.Wires) != 1:
+            return face
+
+        def straight(edge):
+            return isinstance(edge.Curve, Part.Line)
+
+        def ends(edge):
+            return edge.firstVertex(True).Point, edge.lastVertex(True).Point
+
+        def inLine(first, second):
+            a, b = ends(first)
+            c, d = ends(second)
+            u, v = b - a, d - c
+            return (straight(first) and straight(second)
+                    and (b - c).Length < smEpsilon and u.dot(v) > 0
+                    and u.cross(v).Length < smEpsilon * u.Length * v.Length)
+
+        edges = []
+        for edge in face.OuterWire.OrderedEdges:
+            if edges and inLine(edges[-1], edge):
+                edges[-1] = Part.makeLine(ends(edges[-1])[0], ends(edge)[1])
+            else:
+                edges.append(edge)
+        if len(edges) > 1 and inLine(edges[-1], edges[0]):
+            edges[0] = Part.makeLine(ends(edges[-1])[0], ends(edges[0])[1])
+            edges.pop()
+        if len(edges) == len(face.Edges):
+            return face
+        return Part.Face(Part.Wire(edges))
 
     @staticmethod
     def trimFlatPart(outline, flatStart, left, right):
