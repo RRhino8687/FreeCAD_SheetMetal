@@ -120,14 +120,37 @@ def add_wall(doc, base, edge=WALL_EDGE_TOP, **props):
     return wall
 
 
+SM_PARAMS = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Mod/SheetMetal")
+# Saved settings that change what a new feature looks like: the defaults
+# each command remembers (Length Spec, Bend Type, radius...) and the
+# unfolder choice. Tests run with the built-in values instead.
+_PARAM_KINDS = {"String": "String", "Float": "Float", "Boolean": "Bool",
+                "Integer": "Int", "Unsigned": "Unsigned"}
+
+
+def _is_isolated_param(name):
+    return name.startswith("default") or name == "UseOldUnfolder"
+
+
 class FeatureTestCase(unittest.TestCase):
-    """Gives each test its own document and common shape assertions."""
+    """Gives each test its own document, common shape assertions, and
+    SheetMetal's built-in defaults instead of the user's saved ones."""
 
     def setUp(self):
+        self._saved_params = [entry for entry in (SM_PARAMS.GetContents() or [])
+                              if _is_isolated_param(entry[1]) and entry[0] in _PARAM_KINDS]
+        for kind, name, _value in self._saved_params:
+            getattr(SM_PARAMS, "Rem" + _PARAM_KINDS[kind])(name)
         self.doc = FreeCAD.newDocument(self.__class__.__name__)
 
     def tearDown(self):
         FreeCAD.closeDocument(self.doc.Name)
+        # Drop whatever the test left behind, then put the user's back.
+        for kind, name, _value in (SM_PARAMS.GetContents() or []):
+            if _is_isolated_param(name) and kind in _PARAM_KINDS:
+                getattr(SM_PARAMS, "Rem" + _PARAM_KINDS[kind])(name)
+        for kind, name, value in self._saved_params:
+            getattr(SM_PARAMS, "Set" + _PARAM_KINDS[kind])(name, value)
 
     def assertValidSheet(self, obj):
         self.assertNotIn("Invalid", obj.State, f"{obj.Name} failed to recompute")
