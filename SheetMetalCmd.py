@@ -2685,6 +2685,49 @@ if SheetMetalTools.isGuiLoaded():
                 children.append(shapeSketch)
             return children
 
+        def onDelete(self, vobj, subelements):
+            """Deleting a wall with a shape sketch asks what to do with the sketch,
+            which would otherwise be left behind, hidden."""
+            sketch = getattr(vobj.Object, "ShapeSketch", None)
+            if sketch is None or subelements:
+                return True
+            answer = smAskAboutShapeSketch(sketch, translate(
+                "SheetMetal", "Delete the wall \"{}\"?").format(vobj.Object.Label))
+            if answer == "cancel":
+                return False
+            if answer == "delete":
+                vobj.Object.ShapeSketch = None
+                vobj.Object.Document.removeObject(sketch.Name)
+            return True
+
+
+    def smAskAboutShapeSketch(sketch, question):
+        """Ask whether the wall's shape sketch should be deleted too.
+
+        Returns "delete", "keep" or "cancel".
+        """
+        box = QtGui.QMessageBox(Gui.getMainWindow())
+        box.setIcon(QtGui.QMessageBox.Question)
+        box.setWindowTitle(translate("SheetMetal", "Wall shape"))
+        box.setText(question)
+        box.setInformativeText(translate(
+            "SheetMetal", "Delete its shape sketch \"{}\" too, or keep the sketch in the "
+            "document?").format(sketch.Label))
+        deleteButton = box.addButton(translate("SheetMetal", "Delete sketch"),
+                                     QtGui.QMessageBox.AcceptRole)
+        keepButton = box.addButton(translate("SheetMetal", "Keep sketch"),
+                                   QtGui.QMessageBox.AcceptRole)
+        cancelButton = box.addButton(QtGui.QMessageBox.Cancel)
+        box.setDefaultButton(deleteButton)
+        box.setEscapeButton(cancelButton)
+        box.exec() if hasattr(box, "exec") else box.exec_()
+        clicked = box.clickedButton()
+        if clicked == deleteButton:
+            return "delete"
+        if clicked == keepButton:
+            return "keep"
+        return "cancel"
+
 
     class _WallShapeEditObserver:
         """Brings Make Wall's task panel back when Sketcher closes."""
@@ -2841,7 +2884,7 @@ if SheetMetalTools.isGuiLoaded():
                 "Draw the wall's outline in a sketch, starting from its current shape"))
             self.removeShapeButton.setEnabled(sketch is not None)
             self.removeShapeButton.setToolTip(translate(
-                "SheetMetal", "Delete the shape sketch and go back to a plain wall"))
+                "SheetMetal", "Go back to a plain wall, deleting or keeping the shape sketch"))
             # Once the sketch no longer has a field's dimension, the sketch
             # defines it and the field can't change it.
             for fieldName, dimension in self.shapeFields:
@@ -2879,8 +2922,13 @@ if SheetMetalTools.isGuiLoaded():
             sketch = self.obj.ShapeSketch
             if sketch is None:
                 return
+            answer = smAskAboutShapeSketch(sketch, translate(
+                "SheetMetal", "Remove the wall's shape? The wall goes back to a plain wall."))
+            if answer == "cancel":
+                return
             self.obj.ShapeSketch = None
-            self.obj.Document.removeObject(sketch.Name)
+            if answer == "delete":
+                self.obj.Document.removeObject(sketch.Name)
             self.obj.Document.recompute()
             self.updateShapeWidgets()
 
