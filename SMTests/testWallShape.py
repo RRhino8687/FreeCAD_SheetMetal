@@ -142,6 +142,9 @@ class TestWallShape(FeatureTestCase):
                 self.assertEqual(sketch.solve(), 0, "starting sketch doesn't solve")
                 self.assertLess(plain.cut(wall.Shape).Volume, 0.01)
                 self.assertLess(wall.Shape.cut(plain).Volume, 0.01)
+                # Same faces too: no extra seams or slivers on the bend.
+                self.assertEqual(len(wall.Shape.Faces), len(plain.Faces), "face count")
+                self.assertEqual(len(wall.Shape.Edges), len(plain.Edges), "edge count")
                 # The bend is wrapped from B-splines, so allow a tiny volume difference.
                 self.assertAlmostEqual(wall.Shape.Volume, plain.Volume, delta=plain.Volume * 1e-4)
 

@@ -1733,7 +1733,22 @@ def smBend(
                     face.transformShape(toFlat)
                     shapeFlats.append(face.extrude(thkDir * thk))
             else:
-                if bendFace is not None:
+                box = bendFace.BoundBox if bendFace is not None else None
+                squareEnds = (
+                    box is not None
+                    and abs(box.XMin - shapeBendStart) < smEpsilon
+                    and abs(box.XMax - shapeBendEnd) < smEpsilon
+                    and abs(bendFace.Area - (shapeBendEnd - shapeBendStart) * unfoldLength)
+                        < smEpsilon * max(1.0, bendFace.Area))
+                if squareEnds:
+                    # The bend is a plain rectangle in the flat pattern: build it
+                    # exactly as Make Wall always has (flat end faces, no seams).
+                    revFace = smMakeFace(lenEdge, thkDir, thk, gap1, gap2, op="SMR")
+                    if revFace.normalAt(0, 0) != FaceDir:
+                        revFace.reverse()
+                    shapeBend = revFace.revolve(revAxisP, revAxisV, bendA)
+                elif bendFace is not None:
+                    # Angled bend ends: wrap the flat strip onto the bend, as Fold does.
                     bendFace = bendFace.copy()
                     bendFace.transformShape(toFlat)
                     bendFace.translate(thkDir * thk)
