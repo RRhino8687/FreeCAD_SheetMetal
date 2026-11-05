@@ -2485,9 +2485,13 @@ def smCreateWallShapeSketch(wall):
     con(Sketcher.Constraint("Coincident", left, 2, top, 1))
     con(Sketcher.Constraint("Coincident", top, 2, right, 1))
     con(Sketcher.Constraint("Horizontal", top))
-    # Measured to the top line itself, not its corner, so trimming or rounding
-    # a top corner keeps the dimension.
-    name(con(Sketcher.Constraint("Distance", -1, 1, top, height)), "Length")
+    # Length runs from a point halfway between the bend ends to the top line.
+    # Sketcher's Trim drops a point-to-line distance when it trims away the
+    # part of the line nearest the point, so measuring from the middle keeps
+    # the dimension when either top corner is trimmed or rounded.
+    anchor = add(Part.Point(V((bend1 + bend2) / 2, 0, 0)), True)
+    con(Sketcher.Constraint("Symmetric", point1, 1, point2, 1, anchor, 1))
+    name(con(Sketcher.Constraint("Distance", anchor, 1, top, height)), "Length")
 
     for side, pos, plain, low, slant, step_to, sign, label in (
             (left, 1, plain1, low1, slant1, bend1, 1, "Extend1"),

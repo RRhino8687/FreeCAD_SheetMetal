@@ -279,26 +279,56 @@ class TestWallShape(FeatureTestCase):
         self.assertValidSheet(wall)
         self.assertAlmostEqual(upper_part(wall).BoundBox.YMin, 10.0 - 1.0, places=3)
 
-    def test_length_survives_rounding_a_top_corner(self):
-        """Length is measured to the top line, so editing its corners keeps it."""
-        wall = add_wall(self.doc, self.plate)
-        sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
-        lines = [(i, g) for i, g in enumerate(sketch.Geometry) if isinstance(g, Part.LineSegment)]
-        top = max(lines, key=lambda item: item[1].StartPoint.y + item[1].EndPoint.y)
-        left = min((item for item in lines if item is not top),
-                   key=lambda item: item[1].StartPoint.x + item[1].EndPoint.x)
-        top_y, left_x = top[1].StartPoint.y, left[1].StartPoint.x
-        sketch.fillet(top[0], left[0], Vector(left_x + 5, top_y, 0),
-                      Vector(left_x, top_y - 5, 0), 3.0)
-        self.doc.recompute()
-        index = SheetMetalCmd.smFindNamedConstraint(sketch, "Length")
-        self.assertIsNotNone(index, "the Length dimension was deleted")
-        self.assertValidSheet(wall)
-        before = wall.Shape.BoundBox.ZMax
-        sketch.setDatum(index, FreeCAD.Units.Quantity(25.0, FreeCAD.Units.Length))
-        self.doc.recompute()
-        self.assertValidSheet(wall)
-        self.assertAlmostEqual(wall.Shape.BoundBox.ZMax - before, 5.0, places=4)
+    def test_length_survives_editing_a_top_corner(self):
+        """Trimming or rounding either top corner keeps the Length dimension.
+
+        Sketcher's Trim drops a point-to-line distance when it trims away the
+        part of the line nearest the point, so Length is measured from the
+        middle of the bend span.
+        """
+        height, ba = 20.0, bend_allowance()
+        chamfer = 6 * 6 / 2       # corner cut off by a line through (0, 14) and (6, 20)
+        rounding = 9 - math.pi * 9 / 4  # corner removed by a 3 mm fillet
+        cases = [
+            ("trim top-left", 1, "trim", chamfer),
+            ("trim top-right", -1, "trim", chamfer),
+            ("round top-left", 1, "fillet", rounding),
+            ("round top-right", -1, "fillet", rounding),
+        ]
+        for label, side, edit, removed in cases:
+            with self.subTest(label):
+                wall = add_wall(self.doc, self.plate)
+                sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
+
+                def at(x, y):
+                    """A point measured inwards from the corner on this side."""
+                    return Vector(x if side == 1 else 100 - x, y, 0)
+
+                def geometry_at(point):
+                    return min((i for i, g in enumerate(sketch.Geometry)
+                                if not isinstance(g, Part.Point)),
+                               key=lambda i: sketch.Geometry[i].toShape().distToShape(
+                                   Part.Vertex(point))[0])
+
+                if edit == "trim":
+                    sketch.addGeometry(Part.LineSegment(at(-2, height - 8), at(8, height + 2)))
+                    for pick in (at(0, height - 2), at(2, height),
+                                 at(-1, height - 7), at(7, height + 1)):
+                        sketch.trim(geometry_at(pick), pick)
+                else:
+                    top, corner_side = geometry_at(at(50, height)), geometry_at(at(0, 5))
+                    sketch.fillet(top, corner_side, at(5, height), at(0, height - 5), 3.0)
+                self.doc.recompute()
+                index = SheetMetalCmd.smFindNamedConstraint(sketch, "Length")
+                self.assertIsNotNone(index, "the Length dimension was deleted")
+                self.assertValidSheet(wall)
+                area = 100 * (height + ba) - removed
+                self.assertAlmostEqual(wall.Shape.Volume, PLATE_VOLUME + area * THK, delta=2.0)
+                before = wall.Shape.BoundBox.ZMax
+                sketch.setDatum(index, FreeCAD.Units.Quantity(25.0, FreeCAD.Units.Length))
+                self.doc.recompute()
+                self.assertValidSheet(wall)
+                self.assertAlmostEqual(wall.Shape.BoundBox.ZMax - before, 5.0, places=4)
 
     def test_removing_the_sketch_gives_the_plain_wall_back(self):
         wall = add_wall(self.doc, self.plate)
