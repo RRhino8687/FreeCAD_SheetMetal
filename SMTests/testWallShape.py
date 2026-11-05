@@ -279,6 +279,27 @@ class TestWallShape(FeatureTestCase):
         self.assertValidSheet(wall)
         self.assertAlmostEqual(upper_part(wall).BoundBox.YMin, 10.0 - 1.0, places=3)
 
+    def test_length_survives_rounding_a_top_corner(self):
+        """Length is measured to the top line, so editing its corners keeps it."""
+        wall = add_wall(self.doc, self.plate)
+        sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
+        lines = [(i, g) for i, g in enumerate(sketch.Geometry) if isinstance(g, Part.LineSegment)]
+        top = max(lines, key=lambda item: item[1].StartPoint.y + item[1].EndPoint.y)
+        left = min((item for item in lines if item is not top),
+                   key=lambda item: item[1].StartPoint.x + item[1].EndPoint.x)
+        top_y, left_x = top[1].StartPoint.y, left[1].StartPoint.x
+        sketch.fillet(top[0], left[0], Vector(left_x + 5, top_y, 0),
+                      Vector(left_x, top_y - 5, 0), 3.0)
+        self.doc.recompute()
+        index = SheetMetalCmd.smFindNamedConstraint(sketch, "Length")
+        self.assertIsNotNone(index, "the Length dimension was deleted")
+        self.assertValidSheet(wall)
+        before = wall.Shape.BoundBox.ZMax
+        sketch.setDatum(index, FreeCAD.Units.Quantity(25.0, FreeCAD.Units.Length))
+        self.doc.recompute()
+        self.assertValidSheet(wall)
+        self.assertAlmostEqual(wall.Shape.BoundBox.ZMax - before, 5.0, places=4)
+
     def test_removing_the_sketch_gives_the_plain_wall_back(self):
         wall = add_wall(self.doc, self.plate)
         plain_volume = wall.Shape.Volume

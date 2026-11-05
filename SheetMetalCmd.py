@@ -2485,7 +2485,9 @@ def smCreateWallShapeSketch(wall):
     con(Sketcher.Constraint("Coincident", left, 2, top, 1))
     con(Sketcher.Constraint("Coincident", top, 2, right, 1))
     con(Sketcher.Constraint("Horizontal", top))
-    name(con(Sketcher.Constraint("DistanceY", -1, 1, top, 1, height)), "Length")
+    # Measured to the top line itself, not its corner, so trimming or rounding
+    # a top corner keeps the dimension.
+    name(con(Sketcher.Constraint("Distance", -1, 1, top, height)), "Length")
 
     for side, pos, plain, low, slant, step_to, sign, label in (
             (left, 1, plain1, low1, slant1, bend1, 1, "Extend1"),
