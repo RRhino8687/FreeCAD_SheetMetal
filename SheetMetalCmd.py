@@ -1336,12 +1336,13 @@ class SMWallShape:
                 translate("SheetMetal", "The shape sketch leaves no room for the bend."))
         return start, end
 
-    def flatOutline(self, bendStart, bendEnd, rise):
+    def flatOutline(self, bendStart, bendEnd, rise, bendAllowance):
         """The closed outline as a face, in flat-pattern coordinates.
 
         x runs along the attachment edge, y from where the bend starts.
         `rise` is how far above the bend's start the reference line lands in
-        the flat pattern (bend allowance minus setback).
+        the flat pattern (bend allowance minus setback); the flat part
+        starts at `bendAllowance`.
         """
         shift = FreeCAD.Vector(0, rise, 0)
         chain = self.chain.copy()
@@ -1361,11 +1362,27 @@ class SMWallShape:
             ends = [chain.OrderedVertexes[0].Point, chain.OrderedVertexes[-1].Point]
             left, right = sorted(ends, key=lambda p: p.x)
         start, end = FreeCAD.Vector(bendStart, 0, 0), FreeCAD.Vector(bendEnd, 0, 0)
-        edges = list(chain.Edges)
-        for corner, looseEnd in ((start, left), (end, right)):
+        closings = []
+        for corner, looseEnd, original, past in (
+                (start, left, self.leftEnd, left.x < bendStart - smEpsilon),
+                (end, right, self.rightEnd, right.x > bendEnd + smEpsilon)):
             if (corner - looseEnd).Length < smEpsilon:
                 continue
-            closing = Part.makeLine(corner, looseEnd)
+            if past and abs(original.y) < smEpsilon:
+                # A loose end on the reference line, past the bend end: the
+                # flat part reaches past the bend, as Extend does. The bend
+                # end stays square and the outline steps out where the flat
+                # part starts.
+                trimmed = self._startAtFlatPart(chain, looseEnd, bendAllowance)
+                if trimmed is not None:
+                    chain, looseEnd = trimmed
+                    turn = FreeCAD.Vector(corner.x, bendAllowance, 0)
+                    closings.append((Part.makeLine(corner, turn), looseEnd))
+                    closings.append((Part.makeLine(turn, looseEnd), looseEnd))
+                    continue
+            closings.append((Part.makeLine(corner, looseEnd), looseEnd))
+        edges = list(chain.Edges)
+        for closing, looseEnd in closings:
             for v in closing.section(chain).Vertexes:
                 if (v.Point - looseEnd).Length > smEpsilon:
                     raise SheetMetalTools.SMException(translate(
@@ -1383,6 +1400,28 @@ class SMWallShape:
         # Anything below the bend's start would lie on the sheet: ignore it.
         box = face.BoundBox
         return self._band(face, box.XMin - 1, box.XMax + 1, 0.0, box.YMax + 1)
+
+    @staticmethod
+    def _startAtFlatPart(chain, looseEnd, flatStart):
+        """Cut the chain's end edge at `looseEnd` so it starts where the flat
+        part starts. Returns (chain, new loose end), or None if that edge
+        doesn't cross that line."""
+        if looseEnd.y >= flatStart - smEpsilon:
+            return chain, looseEnd
+        edges = chain.OrderedEdges
+        atStart = (chain.OrderedVertexes[0].Point - looseEnd).Length < smEpsilon
+        endEdge = edges[0] if atStart else edges[-1]
+        box = chain.BoundBox
+        above = Part.makeBox(box.XLength + 2, box.YMax - flatStart + 1, 2,
+                             FreeCAD.Vector(box.XMin - 1, flatStart, -1))
+        kept = endEdge.common(above).Edges
+        if len(kept) != 1:
+            return None
+        newEnd = min((v.Point for v in kept[0].Vertexes), key=lambda p: abs(p.y - flatStart))
+        if abs(newEnd.y - flatStart) > smEpsilon:
+            return None
+        rest = list(edges[1:] if atStart else edges[:-1])
+        return Part.Wire(Part.__sortEdges__(rest + kept)), newEnd
 
     @staticmethod
     def _band(face, xmin, xmax, ymin, ymax):
@@ -1769,7 +1808,8 @@ def smBend(
             unfoldLength = (bendR + kfactor * thk) * bendA * math.pi / 180.0
             toFlat = FreeCAD.Placement(
                 P0, FreeCAD.Rotation(edgeDir, FaceDir, edgeDir.cross(FaceDir), "ZXY")).toMatrix()
-            outline = wallShape.flatOutline(shapeBendStart, shapeBendEnd, unfoldLength - setback)
+            outline = wallShape.flatOutline(shapeBendStart, shapeBendEnd, unfoldLength - setback,
+                                            unfoldLength)
             bendFace, flatFaces = wallShape.split(outline, unfoldLength)
             if unfold:
                 for face in outline.Faces:
@@ -2487,10 +2527,11 @@ def smCreateWallShapeSketch(wall):
     part differ from the bend, the side starts where the flat part starts and
     a step joins it to the bend end, so the wall stays exactly the same.
 
-    Named dimensions: Gap1/Gap2 place construction points at the bend ends,
-    measured from the sketch's origin and from the edge's far end, so the
-    right side follows when the edge changes length. Extend1/Extend2 place
-    the sides from those points, and Length is the height.
+    Named dimensions, matching the task panel: GapA/GapB place construction
+    points at the bend ends, measured from the sketch's origin and from the
+    edge's far end, so the right side follows when the edge changes length.
+    ExtendA/ExtendB place the sides from those points, and Length is the
+    height.
 
     The sketch is seen from the outside of the bend, so it may run
     backwards along the edge; then the wall's Gap 1 side is on its right.
@@ -2527,16 +2568,21 @@ def smCreateWallShapeSketch(wall):
     if not wall.AutoMiter:
         miter1, miter2 = wall.miterangle1.Value, wall.miterangle2.Value
     # From here on, 1 is the sketch's left (x = 0) and 2 its right.
-    names = {"Gap1": "Gap1", "Gap2": "Gap2", "Extend1": "Extend1", "Extend2": "Extend2"}
+    # Named after the task panel's Gap A/B and Extend A/B fields.
+    names = {"Gap1": "GapA", "Gap2": "GapB", "Extend1": "ExtendA", "Extend2": "ExtendB"}
     if backwards:
         gap1, gap2, ext1, ext2, miter1, miter2 = gap2, gap1, ext2, ext1, miter2, miter1
-        names = {"Gap1": "Gap2", "Gap2": "Gap1", "Extend1": "Extend2", "Extend2": "Extend1"}
+        names = {"Gap1": "GapB", "Gap2": "GapA", "Extend1": "ExtendB", "Extend2": "ExtendA"}
     slant1 = (height - setback) * math.tan(math.radians(miter1))
     slant2 = (height - setback) * math.tan(math.radians(miter2))
     bend1, bend2 = gap1, length - gap2
     side1, side2 = gap1 - ext1, length - gap2 + ext2
-    plain1 = abs(ext1) < smEpsilon and abs(miter1) < smEpsilon
-    plain2 = abs(ext2) < smEpsilon and abs(miter2) < smEpsilon
+    # A plain side's loose end sits on the reference line; Extend >= 0 then
+    # works like Make Wall's Extend (see SMWallShape.flatOutline). A miter or
+    # a negative Extend needs the side to start where the flat part starts,
+    # with a step from the bend end.
+    plain1 = ext1 > -smEpsilon and abs(miter1) < smEpsilon
+    plain2 = ext2 > -smEpsilon and abs(miter2) < smEpsilon
     low1 = 0.0 if plain1 else setback
     low2 = 0.0 if plain2 else setback
 
@@ -2597,6 +2643,14 @@ def smCreateWallShapeSketch(wall):
         else:
             name(con(Sketcher.Constraint("DistanceX", point, 1, side, pos, ext2)), label)
 
+    # Keep the labels apart, below the reference line: Extend dimensions
+    # first, Gap ones further down (both are often 0 and would sit on top of
+    # each other).
+    spacing = max(height, length) * 0.12
+    for label, rank in (("ExtendA", 1), ("ExtendB", 1), ("GapA", 2), ("GapB", 2)):
+        index = named.get(label)
+        if index is not None:
+            sketch.setLabelDistance(index, rank * spacing)
     sketch.Visibility = False
     wall.ShapeSketch = sketch
     doc.recompute()
@@ -2746,8 +2800,8 @@ if SheetMetalTools.isGuiLoaded():
 
         # Wall shape (Edit Shape).
         # Fields the starting shape sketch has a dimension for.
-        shapeFields = (("Length", "Length"), ("extend1", "Extend1"), ("extend2", "Extend2"),
-                       ("gap1", "Gap1"), ("gap2", "Gap2"))
+        shapeFields = (("Length", "Length"), ("extend1", "ExtendA"), ("extend2", "ExtendB"),
+                       ("gap1", "GapA"), ("gap2", "GapB"))
 
         def setupShapeWidgets(self):
             box = QtGui.QGroupBox(translate("SheetMetal", "Wall shape"))

@@ -171,6 +171,36 @@ class TestWallShape(FeatureTestCase):
         self.assertEqual(errors, [])
         self.assertValidSheet(wall)
 
+    def test_panel_values_give_the_plain_wall(self):
+        """Setting Gap A/B and Extend A/B on a shaped wall, as the task panel
+        does, gives exactly the wall Make Wall makes with the same values.
+
+        A negative Extend is the exception: it moves a loose end inside the
+        bend span, which narrows the bend (see test_custom_outlines).
+        """
+        fields = {"gap1": "GapA", "gap2": "GapB", "extend1": "ExtendA", "extend2": "ExtendB"}
+        cases = [
+            ({"gap1": 5.0, "gap2": 10.0}, "Leg"),
+            ({"extend1": 3.0, "extend2": 2.0}, "Leg"),
+            ({"gap1": 5.0, "extend1": 2.0}, "Leg"),
+            ({"gap1": 5.0, "gap2": 10.0}, "Outer Sharp"),
+            ({"extend1": 3.0, "extend2": 2.0}, "Outer Sharp"),
+            ({"gap1": 5.0, "extend1": 2.0}, "Outer Sharp"),
+        ]
+        for values, spec in cases:
+            with self.subTest(values=values, spec=spec):
+                plain = add_wall(self.doc, self.plate, LengthSpec=spec, **values).Shape
+                wall = add_wall(self.doc, self.plate, LengthSpec=spec)
+                sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
+                for prop, value in values.items():
+                    setattr(wall, prop, value)
+                    sketch.setDatum(SheetMetalCmd.smFindNamedConstraint(sketch, fields[prop]),
+                                    FreeCAD.Units.Quantity(value, FreeCAD.Units.Length))
+                self.doc.recompute()
+                self.assertValidSheet(wall)
+                self.assertLess(plain.cut(wall.Shape).Volume + wall.Shape.cut(plain).Volume, 0.01)
+                self.assertEqual(len(wall.Shape.Faces), len(plain.Faces), "face count")
+
     def test_starting_sketch_stands_on_the_wall(self):
         """Edit Shape shows the sketch on the wall's flat part (ADR 0001)."""
         for label, props in [("90", {}), ("45", {"angle": 45.0}), ("135", {"angle": 135.0}),
@@ -361,7 +391,7 @@ class TestWallShape(FeatureTestCase):
         wall = add_wall(self.doc, self.plate, gap1=4.0, extend1=1.0)
         sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
         wall.gap1 = 10.0
-        sketch.setDatum(SheetMetalCmd.smFindNamedConstraint(sketch, "Gap1"),
+        sketch.setDatum(SheetMetalCmd.smFindNamedConstraint(sketch, "GapA"),
                         FreeCAD.Units.Quantity(10.0, FreeCAD.Units.Length))
         self.doc.recompute()
         self.assertValidSheet(wall)
