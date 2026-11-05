@@ -183,22 +183,22 @@ class TestWallShape(FeatureTestCase):
                           key=lambda e: e.CenterOfMass.distanceToPoint(self.plate.Shape.CenterOfMass))
                 self.assertLess(wall.Shape.distToShape(Part.Vertex(top.CenterOfMass))[0], 1e-6)
 
-    def test_starting_sketch_faces_the_picked_side(self):
-        """The sketch is seen from the side of the sheet the edge was picked on.
-
-        That face carries on through the bend, so for a wall going up from the
-        top edge it is the wall's inside face, and with Invert the outside.
+    def test_starting_sketch_is_seen_from_outside(self):
+        """The sketch is seen from the outside of the bend, looking back at the
+        edge. Invert keeps the same side (so the sketch never mirrors), which
+        then shows the inside.
         """
         s45 = math.sqrt(0.5)
         top_right = ((PLATE_W, 0, THK), (PLATE_W, PLATE_L, THK))
         cases = [
             # label, edge, props, direction the viewer looks from
-            ("top edge, up", top_right, {}, (-1, 0, 0)),
-            ("top edge, inverted", top_right, {"invert": True}, (1, 0, 0)),
-            ("bottom edge, down", ((PLATE_W, 0, 0), (PLATE_W, PLATE_L, 0)), {}, (-1, 0, 0)),
-            ("other side of the plate", ((0, 0, THK), (0, PLATE_L, THK)), {}, (1, 0, 0)),
-            ("45 degrees", top_right, {"angle": 45.0}, (-s45, 0, s45)),
-            ("135 degrees", top_right, {"angle": 135.0}, (-s45, 0, -s45)),
+            ("top edge, up", top_right, {}, (1, 0, 0)),
+            ("top edge, inverted", top_right, {"invert": True}, (-1, 0, 0)),
+            ("bottom edge, down", ((PLATE_W, 0, 0), (PLATE_W, PLATE_L, 0)), {}, (1, 0, 0)),
+            ("bottom rear edge, down", ((0, PLATE_L, 0), (PLATE_W, PLATE_L, 0)), {}, (0, 1, 0)),
+            ("other side of the plate", ((0, 0, THK), (0, PLATE_L, THK)), {}, (-1, 0, 0)),
+            ("45 degrees", top_right, {"angle": 45.0}, (s45, 0, -s45)),
+            ("135 degrees", top_right, {"angle": 135.0}, (s45, 0, s45)),
         ]
         for label, edge, props, expected in cases:
             with self.subTest(label):
@@ -220,18 +220,17 @@ class TestWallShape(FeatureTestCase):
         wall.ShapeFrame = stale
         sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
         normal = sketch.getGlobalPlacement().Rotation.multVec(Vector(0, 0, 1))
-        self.assertGreater(normal.dot(Vector(-1, 0, 0)), 0.999, f"normal {normal}")
+        self.assertGreater(normal.dot(Vector(1, 0, 0)), 0.999, f"normal {normal}")
         wall.ShapeFrame = stale
         SheetMetalCmd.smRefreshWallShapeTilt(wall)
         self.doc.recompute()
         normal = sketch.getGlobalPlacement().Rotation.multVec(Vector(0, 0, 1))
-        self.assertGreater(normal.dot(Vector(-1, 0, 0)), 0.999, f"after refresh {normal}")
+        self.assertGreater(normal.dot(Vector(1, 0, 0)), 0.999, f"after refresh {normal}")
 
     def test_sketch_stays_put_when_the_viewing_side_changes(self):
         """Invert changes which side the sketch is seen from, but never mirrors it.
 
-        The sketch's direction along the edge depends only on the face the edge
-        was picked on, not on which way the wall bends.
+        The sketch's direction along the edge doesn't depend on Invert.
         """
         wall = add_wall(self.doc, self.plate, gap1=5.0, gap2=20.0)
         sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)

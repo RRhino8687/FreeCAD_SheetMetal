@@ -1256,15 +1256,21 @@ def smLengthSpecSetback(LengthSpec, bendA, bendR, thk):
     return 0.0
 
 
-def _smSketchRunsBackwards(edgeDir, faceDir, thkDir):
+def _smSketchRunsBackwards(edgeDir, faceDir, thkDir, pickedEdge):
     """True if the shape sketch's x runs from the edge's end to its start.
 
-    The sketch is seen from the side of the sheet the edge was picked on,
-    followed through the bend: its normal is -thkDir before bending, and
-    its y is faceDir. Its x must then be faceDir x -thkDir to stay
-    right-handed.
+    The sketch is seen from the outside of the bend, as Make Wall bends the
+    wall without Invert or a negative angle. Make Wall bends a wall towards
+    the face a picked edge lies on (thkDir points from that face into the
+    sheet), so before bending the outside is +thkDir; for a picked side face
+    it bends the other way. The sketch's y is faceDir, so its x must be
+    faceDir x outside to stay right-handed.
+
+    Invert and a negative angle don't change this, so they never mirror an
+    existing sketch; they only show it from the inside.
     """
-    return faceDir.cross(thkDir * -1).dot(edgeDir) < 0
+    outside = thkDir if pickedEdge else thkDir * -1
+    return faceDir.cross(outside).dot(edgeDir) < 0
 
 
 def smShapeSketchReversed(selItemName, MainObject):
@@ -1276,7 +1282,9 @@ def smShapeSketchReversed(selItemName, MainObject):
         thkDir = center.sub(edge.Curve.value(edge.Curve.parameter(center))).normalize()
     edgeDir = edge.valueAt(edge.LastParameter) - edge.valueAt(edge.FirstParameter)
     edgeDir.normalize()
-    return edge, _smSketchRunsBackwards(edgeDir, selFace.normalAt(0, 0), thkDir)
+    pickedEdge = isinstance(
+        MainObject.getElement(SheetMetalTools.getElementFromTNP(selItemName)), Part.Edge)
+    return edge, _smSketchRunsBackwards(edgeDir, selFace.normalAt(0, 0), thkDir, pickedEdge)
 
 
 class SMWallShape:
@@ -1731,14 +1739,16 @@ def smBend(
             revAxisP = lenEdge.valueAt(lenEdge.FirstParameter) + thkDir * -bendR
 
         # The shape sketch's frame: x along the attachment edge, y along the
-        # flat part, seen from the side the edge was picked on (see
-        # smShapeSketchReversed). `P0` is the end of the edge the sketch's x
+        # flat part, seen from the outside of the bend (see
+        # _smSketchRunsBackwards). `P0` is the end of the edge the sketch's x
         # starts from, moved onto the line the bend starts from (Bend Type
         # can move that line).
         edgeStart = AlenEdge.valueAt(AlenEdge.FirstParameter)
         edgeDir = AlenEdge.valueAt(AlenEdge.LastParameter) - edgeStart
         edgeDir.normalize()
-        if _smSketchRunsBackwards(edgeDir, FaceDir, thkDir):
+        pickedEdge = isinstance(MainObject.getElement(
+            SheetMetalTools.getElementFromTNP(selFaceNames[i])), Part.Edge)
+        if _smSketchRunsBackwards(edgeDir, FaceDir, thkDir, pickedEdge):
             edgeStart = AlenEdge.valueAt(AlenEdge.LastParameter)
             edgeDir = edgeDir * -1
         P0 = noGap_lenEdge.Curve.value(noGap_lenEdge.Curve.parameter(edgeStart))
@@ -2482,7 +2492,7 @@ def smCreateWallShapeSketch(wall):
     right side follows when the edge changes length. Extend1/Extend2 place
     the sides from those points, and Length is the height.
 
-    The sketch is seen from the side the edge was picked on, so it may run
+    The sketch is seen from the outside of the bend, so it may run
     backwards along the edge; then the wall's Gap 1 side is on its right.
     """
     import Sketcher
