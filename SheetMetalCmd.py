@@ -29,6 +29,7 @@ from PySide import QtCore, QtGui
 import FreeCAD
 import Part
 
+import SheetMetalBendSolid
 import SheetMetalTools
 
 # IMPORTANT: please remember to change the element map version in case
@@ -1238,6 +1239,147 @@ def smCalcCutGap(trimedEdge, origEdge, edgePos, bendGap, extend, reliefW, relief
     gap = min(gap_1, gap_2)
     return -gap
 
+def smLengthSpecSetback(LengthSpec, bendA, bendR, thk):
+    """How far above the reference line the flat part of a wall starts.
+
+    Make Wall's Length is measured from the reference line that Length Spec
+    picks, so the flat part is this much shorter than Length.
+    """
+    if LengthSpec == "Tangential":
+        if bendA >= 90.0:
+            return thk + bendR
+        return (bendR + thk) / math.tan(math.radians(90.0 - bendA / 2))
+    if LengthSpec == "Inner Sharp":
+        return bendR / math.tan(math.radians(90.0 - bendA / 2))
+    if LengthSpec == "Outer Sharp":
+        return (bendR + thk) / math.tan(math.radians(90.0 - bendA / 2))
+    return 0.0
+
+
+class SMWallShape:
+    """The outline a shape sketch gives a wall (Edit Wall Shape).
+
+    Everything here works in the shape sketch's own 2D coordinates: x runs
+    along the attachment edge from its start, y up the wall from the reference
+    line. Where the sketch sits in 3D doesn't matter.
+
+    The sketch is one open chain. Its two loose ends are joined to the bend
+    ends by closing lines that are straight in the flat pattern, and the bend
+    span closes the outline. The bend follows the outline, so a closing line
+    that crosses the bend gives the bend an angled end.
+    """
+
+    def __init__(self, sketch):
+        edges = [geo.toShape() for i, geo in enumerate(sketch.Geometry)
+                 if not sketch.getConstruction(i) and not isinstance(geo, Part.Point)]
+        if not edges:
+            raise SheetMetalTools.SMException(
+                translate("SheetMetal", "The shape sketch is empty."))
+        chains = Part.sortEdges(edges)
+        if len(chains) != 1:
+            raise SheetMetalTools.SMException(translate(
+                "SheetMetal", "The shape sketch must be one connected chain of lines and arcs."))
+        self.chain = Part.Wire(chains[0])
+        if self.chain.isClosed():
+            raise SheetMetalTools.SMException(translate(
+                "SheetMetal", "The shape sketch must be open: the attachment edge closes it."))
+        if self.chain.BoundBox.YMin < -smEpsilon:
+            raise SheetMetalTools.SMException(translate(
+                "SheetMetal", "The shape sketch dips below the reference line, onto the sheet."))
+        ends = [self.chain.OrderedVertexes[0].Point, self.chain.OrderedVertexes[-1].Point]
+        self.leftEnd, self.rightEnd = sorted(ends, key=lambda p: p.x)
+
+    def bendSpan(self, edgeLength, gap1, gap2):
+        """Where the bend runs along the attachment edge, as (start, end).
+
+        Gap 1 and Gap 2 are the outer limits. A loose end that sits on the
+        reference line inside them moves the bend end on its side to it.
+        """
+        start, end = gap1, edgeLength - gap2
+        if abs(self.leftEnd.y) < smEpsilon and start < self.leftEnd.x < end:
+            start = self.leftEnd.x
+        if abs(self.rightEnd.y) < smEpsilon and start < self.rightEnd.x < end:
+            end = self.rightEnd.x
+        if end - start < smEpsilon:
+            raise SheetMetalTools.SMException(
+                translate("SheetMetal", "The shape sketch leaves no room for the bend."))
+        return start, end
+
+    def flatOutline(self, bendStart, bendEnd, rise):
+        """The closed outline as a face, in flat-pattern coordinates.
+
+        x runs along the attachment edge, y from where the bend starts.
+        `rise` is how far above the bend's start the reference line lands in
+        the flat pattern (bend allowance minus setback).
+        """
+        shift = FreeCAD.Vector(0, rise, 0)
+        chain = self.chain.copy()
+        chain.translate(shift)
+        left, right = self.leftEnd + shift, self.rightEnd + shift
+        if chain.BoundBox.YMin < -smEpsilon:
+            # With a large setback the reference line lands below the bend's
+            # start; the part of the sketch down there would lie on the sheet.
+            box = chain.BoundBox
+            keep = Part.makeBox(box.XLength + 2, box.YMax + 1, 2,
+                                FreeCAD.Vector(box.XMin - 1, 0, -1))
+            pieces = Part.sortEdges(chain.common(keep).Edges)
+            if len(pieces) != 1:
+                raise SheetMetalTools.SMException(
+                    translate("SheetMetal", "The shape sketch splits the bend in two."))
+            chain = Part.Wire(pieces[0])
+            ends = [chain.OrderedVertexes[0].Point, chain.OrderedVertexes[-1].Point]
+            left, right = sorted(ends, key=lambda p: p.x)
+        start, end = FreeCAD.Vector(bendStart, 0, 0), FreeCAD.Vector(bendEnd, 0, 0)
+        edges = list(chain.Edges)
+        for corner, looseEnd in ((start, left), (end, right)):
+            if (corner - looseEnd).Length < smEpsilon:
+                continue
+            closing = Part.makeLine(corner, looseEnd)
+            for v in closing.section(chain).Vertexes:
+                if (v.Point - looseEnd).Length > smEpsilon:
+                    raise SheetMetalTools.SMException(translate(
+                        "SheetMetal", "A closing line crosses the shape sketch."))
+            edges.append(closing)
+        edges.append(Part.makeLine(start, end))
+        wire = Part.Wire(Part.__sortEdges__(edges))
+        if not wire.isClosed():
+            raise SheetMetalTools.SMException(
+                translate("SheetMetal", "The shape sketch doesn't make a closed outline."))
+        face = Part.Face(wire)
+        if not face.isValid() or face.Area < smEpsilon:
+            raise SheetMetalTools.SMException(translate(
+                "SheetMetal", "The shape sketch crosses itself or its closing lines."))
+        # Anything below the bend's start would lie on the sheet: ignore it.
+        box = face.BoundBox
+        return self._band(face, box.XMin - 1, box.XMax + 1, 0.0, box.YMax + 1)
+
+    @staticmethod
+    def _band(face, xmin, xmax, ymin, ymax):
+        rect = Part.Face(Part.makePolygon([
+            FreeCAD.Vector(xmin, ymin, 0), FreeCAD.Vector(xmax, ymin, 0),
+            FreeCAD.Vector(xmax, ymax, 0), FreeCAD.Vector(xmin, ymax, 0),
+            FreeCAD.Vector(xmin, ymin, 0)]))
+        return face.common(rect)
+
+    def split(self, outline, bendAllowance):
+        """Split the flat outline into the bend's strip and the flat part.
+
+        Returns (bend face, list of flat-part faces).
+        """
+        box = outline.BoundBox
+        if bendAllowance < smEpsilon:
+            return None, list(outline.Faces)
+        bend = self._band(outline, box.XMin - 1, box.XMax + 1, 0.0, bendAllowance).Faces
+        if len(bend) != 1:
+            raise SheetMetalTools.SMException(
+                translate("SheetMetal", "The shape sketch splits the bend in two."))
+        flat = []
+        if box.YMax > bendAllowance + smEpsilon:
+            flat = self._band(outline, box.XMin - 1, box.XMax + 1,
+                              bendAllowance, box.YMax + 1).Faces
+        return bend[0], flat
+
+
 def smBend(
     thk,
     bendR=1.0,
@@ -1273,6 +1415,8 @@ def smBend(
     PerforationInitialLength=5.0,
     PerforationMaxLength=5.0,
     NonperforationMaxLength=5.0,
+    shapeSketch=None,
+    shapeInfo=None,
 ):
     # if sketch is as wall.
     sketches = False
@@ -1281,6 +1425,8 @@ def smBend(
             sketches = True
         else:
             pass
+    # Custom wall outline from a shape sketch (Edit Wall Shape).
+    wallShape = SMWallShape(shapeSketch) if shapeSketch else None
 
     # Add Bend Type details.
     inside = False
@@ -1299,23 +1445,22 @@ def smBend(
         else:
             inside = False
 
-    if LengthSpec == "Leg":
-        pass
-    elif LengthSpec == "Tangential":
-        if bendA >= 90.0:
-            extLen -= thk + bendR
-        else:
-            extLen -= (bendR + thk) / math.tan(math.radians(90.0 - bendA / 2))
-    elif LengthSpec == "Inner Sharp":
-        extLen -= bendR / math.tan(math.radians(90.0 - bendA / 2))
-    elif LengthSpec == "Outer Sharp":
-        extLen -= (bendR + thk) / math.tan(math.radians(90.0 - bendA / 2))
+    setback = smLengthSpecSetback(LengthSpec, bendA, bendR, thk)
+    extLen -= setback
+
+    if wallShape:
+        # The shape sketch decides where the bend runs, within Gap 1/2.
+        attachmentEdge = smEdge(selFaceNames[0], MainObject)[0]
+        shapeEdgeLength = attachmentEdge.Length
+        shapeBendStart, shapeBendEnd = wallShape.bendSpan(shapeEdgeLength, gap1, gap2)
+        gap1, gap2 = shapeBendStart, shapeEdgeLength - shapeBendEnd
+        extend1 = extend2 = 0.0
 
     nogaptrimedgelist = []
     mainlist, trimedgelist, nogaptrimedgelist = getBendetail(
         selFaceNames, MainObject, bendR, bendA, flipped, offset, gap1, gap2
     )
-    if not (sketches):
+    if not (sketches or wallShape):
         (
             miterA1List,
             miterA2List,
@@ -1339,6 +1484,10 @@ def smBend(
         )
 
         # print(miterA1List, miterA2List, gap1List, gap2List, extend1List, extend2List)
+    elif wallShape:
+        # No miters; gaps are relative to the edge already trimmed to the bend.
+        (miterA1List, miterA2List, gap1List, gap2List, extend1List, extend2List) = (
+            [0.0], [0.0], [0.0], [0.0], [0.0], [0.0])
     else:
         (
             miterA1List,
@@ -1552,8 +1701,61 @@ def smBend(
         else:
             revAxisP = lenEdge.valueAt(lenEdge.FirstParameter) + thkDir * -bendR
 
+        # The shape sketch's frame: x along the attachment edge from its
+        # start, y along the flat part. `P0` is the edge's start moved onto
+        # the line the bend starts from (Bend Type can move that line).
+        edgeStart = AlenEdge.valueAt(AlenEdge.FirstParameter)
+        edgeDir = AlenEdge.valueAt(AlenEdge.LastParameter) - edgeStart
+        edgeDir.normalize()
+        P0 = noGap_lenEdge.Curve.value(noGap_lenEdge.Curve.parameter(edgeStart))
+        if shapeInfo is not None and i == 0:
+            # Where the sketch is shown: on the flat part's plane, with its
+            # origin on the reference line at the start of the edge.
+            rot = FreeCAD.Rotation(revAxisV, bendA)
+            origin = revAxisP + rot.multVec(P0 - FaceDir * setback - revAxisP)
+            yDir = rot.multVec(FaceDir)
+            shapeInfo["frame"] = FreeCAD.Placement(
+                origin, FreeCAD.Rotation(edgeDir, yDir, edgeDir.cross(yDir), "ZXY"))
+            shapeInfo["setback"] = setback
+
+        shapeBend = None
+        shapeFlats = []
+        if wallShape:
+            # Build the outline in the flat pattern, then bend it as Fold does.
+            unfoldLength = (bendR + kfactor * thk) * bendA * math.pi / 180.0
+            toFlat = FreeCAD.Placement(
+                P0, FreeCAD.Rotation(edgeDir, FaceDir, edgeDir.cross(FaceDir), "ZXY")).toMatrix()
+            outline = wallShape.flatOutline(shapeBendStart, shapeBendEnd, unfoldLength - setback)
+            bendFace, flatFaces = wallShape.split(outline, unfoldLength)
+            if unfold:
+                for face in outline.Faces:
+                    face = face.copy()
+                    face.transformShape(toFlat)
+                    shapeFlats.append(face.extrude(thkDir * thk))
+            else:
+                if bendFace is not None:
+                    bendFace = bendFace.copy()
+                    bendFace.transformShape(toFlat)
+                    bendFace.translate(thkDir * thk)
+                    if bendFace.normalAt(0, 0).dot(thkDir) < 0:
+                        bendFace.reverse()
+                    bendLineStart = P0 + thkDir * thk
+                    bendLine = Part.makeLine(bendLineStart,
+                                             bendLineStart + edgeDir * shapeEdgeLength)
+                    shapeBend = SheetMetalBendSolid.bend_solid(
+                        bendFace, bendLine, bendR, thk, bendR + kfactor * thk, revAxisV, flipped)
+                for face in flatFaces:
+                    face = face.copy()
+                    face.translate(FreeCAD.Vector(0, -unfoldLength, 0))
+                    face.transformShape(toFlat)
+                    flatSolid = face.extrude(thkDir * thk)
+                    flatSolid.rotate(revAxisP, revAxisV, bendA)
+                    shapeFlats.append(flatSolid)
+
         wallSolid = None
-        if sketches:
+        if wallShape:
+            pass
+        elif sketches:
             Wall_face = Part.makeFace(sketch.Shape.Wires, "Part::FaceMakerBullseye")
             if inside:
                 Wall_face.translate(FaceDir * offset)
@@ -1577,7 +1779,12 @@ def smBend(
 
         if not unfold:
             # Produce bend Solid.
-            if bendA > 0.0:
+            if wallShape:
+                if shapeBend is not None:
+                    resultSolid = resultSolid.fuse(shapeBend)
+                for flatSolid in shapeFlats:
+                    resultSolid = resultSolid.fuse(flatSolid)
+            elif bendA > 0.0:
                 # Create bend.
                 # Narrow the wall if we have gaps.
                 revFace = smMakeFace(lenEdge, thkDir, thk, gap1, gap2, op="SMR")
@@ -1611,8 +1818,11 @@ def smBend(
                 # Part.show(perfSolid)
                 resultSolid = resultSolid.cut(perfSolid)
         else:
+            if wallShape:
+                for flatSolid in shapeFlats:
+                    resultSolid = resultSolid.fuse(flatSolid)
             # Produce unfold Solid.
-            if bendA > 0.0:
+            elif bendA > 0.0:
                 # Create bend.
                 unfoldLength = (bendR + kfactor * thk) * bendA * math.pi / 180.0
                 # Narrow the wall if we have gaps.
@@ -1622,7 +1832,7 @@ def smBend(
                 unfoldSolid = unfoldFace.extrude(FaceDir * unfoldLength)
                 # Part.show(unfoldSolid)
                 resultSolid = resultSolid.fuse(unfoldSolid)
-            if extLen > 0.0:
+            if extLen > 0.0 and wallSolid is not None:
                 # Flatten the wall back out.
                 wallSolid.rotate(revAxisP, revAxisV, -bendA)
                 # Part.show(wallSolid, "wallSolid")
@@ -1865,6 +2075,36 @@ class SMBendWall:
                 "Supplementary angle reference",
                 False,
                 "ParametersEx")
+        SheetMetalTools.smAddProperty(obj,
+                "App::PropertyLink",
+                "ShapeSketch",
+                translate("App::Property",
+                          "Open sketch that gives the wall a custom outline (Edit Shape)"),
+                None,
+                "ParametersShape")
+        # Written by every recompute, read by Edit Shape to place the sketch.
+        SheetMetalTools.smAddProperty(obj,
+                "App::PropertyPlacement",
+                "ShapeFrame",
+                "Where the shape sketch is shown: on the flat part, with its "
+                "origin on the reference line at the start of the attachment edge",
+                None, "ParametersShape", readOnly=True, isHiddden=True, attribs=8)
+        SheetMetalTools.smAddProperty(obj,
+                "App::PropertyDistance",
+                "ShapeSetback",
+                "How far above the reference line the flat part starts",
+                None, "ParametersShape", readOnly=True, isHiddden=True, attribs=8)
+
+    # Properties the shape sketch takes over; hidden while there is one.
+    shapeReplacedProperties = ("length", "extend1", "extend2", "miterangle1", "miterangle2",
+                               "AutoMiter", "minGap", "maxExtendDist")
+
+    def onChanged(self, fp, prop):
+        if prop == "ShapeSketch":
+            mode = 2 if fp.ShapeSketch is not None else 0
+            for name in SMBendWall.shapeReplacedProperties:
+                if hasattr(fp, name):
+                    fp.setEditorMode(name, mode)
 
     def getElementMapVersion(self, _fp, ver, _prop, restored):
         if not restored:
@@ -1905,6 +2145,17 @@ class SMBendWall:
         fp.LengthList = LengthList
         fp.bendAList = bendAList
         # print(LengthList, bendAList)
+
+        shapeSketch = fp.ShapeSketch
+        if shapeSketch is not None:
+            if len(face) != 1:
+                raise SheetMetalTools.SMException(translate(
+                    "SheetMetal", "A wall shape needs a wall on exactly one edge."))
+            if fp.Sketch:
+                raise SheetMetalTools.SMException(translate(
+                    "SheetMetal", "A wall shape can't be combined with the wall's Sketch."))
+        # Only single-edge walls get a frame for showing a shape sketch.
+        shapeInfo = {} if len(face) == 1 and not fp.Sketch else None
 
         # Extend value needed for first bend set only.
         extend1_list = [0.0 for n in LengthList]
@@ -2054,12 +2305,215 @@ class SMBendWall:
                 PerforationAngle=fp.PerforationAngle.Value,
                 PerforationInitialLength=fp.PerforationInitialLength.Value,
                 PerforationMaxLength=fp.PerforationMaxLength.Value,
-                NonperforationMaxLength=fp.NonperforationMaxLength.Value)
+                NonperforationMaxLength=fp.NonperforationMaxLength.Value,
+                shapeSketch=shapeSketch if i == 0 else None,
+                shapeInfo=shapeInfo if i == 0 else None)
             faces = smGetFace(f, s)
             face = faces
             Main_Object = s
 
         fp.Shape = s
+        if shapeInfo and "frame" in shapeInfo:
+            if not fp.ShapeFrame.isSame(shapeInfo["frame"], 1e-9):
+                fp.ShapeFrame = shapeInfo["frame"]
+            if abs(fp.ShapeSetback.Value - shapeInfo["setback"]) > 1e-9:
+                fp.ShapeSetback = shapeInfo["setback"]
+
+
+###################################################################################################
+# Wall shape (Edit Shape): the starting sketch and its placement
+###################################################################################################
+
+def smWallShapeUnavailableReason(wall):
+    """Why a wall can't get a shape sketch, or an empty string if it can."""
+    if len(wall.baseObject[1]) != 1:
+        return translate("SheetMetal", "Edit Shape works on walls built on one edge.")
+    if wall.Sketch:
+        return translate("SheetMetal",
+                         "Edit Shape doesn't work on walls that use the multi-bend Sketch.")
+    return ""
+
+
+def smFindNamedConstraint(sketch, name):
+    """Index of the sketch constraint with this name, or None."""
+    for i, constraint in enumerate(sketch.Constraints):
+        if constraint.Name == name:
+            return i
+    return None
+
+
+def smWallAttachmentEdge(wall):
+    """The wall's attachment edge, and its name in the base object."""
+    base, subNames = wall.baseObject
+    edge = smEdge(subNames[0], base.Shape)[0]
+    for i, baseEdge in enumerate(base.Shape.Edges):
+        if baseEdge.isSame(edge):
+            return base, edge, f"Edge{i + 1}"
+    raise SheetMetalTools.SMException("Attachment edge not found in the base object.")
+
+
+def _smElementName(shape, element, kind):
+    for i, candidate in enumerate(getattr(shape, kind + "es" if kind == "Vertex" else kind + "s")):
+        if candidate.isSame(element):
+            return f"{kind}{i + 1}"
+    return None
+
+
+def smAttachWallShapeSketch(sketch, wall):
+    """Attach the sketch at the start of the attachment edge (Align O-X-Y).
+
+    The sketch then moves with the edge. Its tilt to the wall's angle is the
+    AttachmentOffset, refreshed by smRefreshWallShapeTilt().
+    """
+    base, edge, edgeName = smWallAttachmentEdge(wall)
+    start = edge.valueAt(edge.FirstParameter)
+    vertex = min(base.Shape.Vertexes, key=lambda v: (v.Point - start).Length)
+    edgeDir = edge.valueAt(edge.LastParameter) - start
+    edgeDir.normalize()
+    otherName = None
+    for other in base.Shape.ancestorsOfType(vertex, Part.Edge):
+        if other.isSame(edge) or not isinstance(other.Curve, Part.Line):
+            continue
+        otherDir = other.Curve.Direction
+        if abs(otherDir.dot(edgeDir)) < 1.0 - 1e-6:
+            otherName = _smElementName(base.Shape, other, "Edge")
+            break
+    vertexName = _smElementName(base.Shape, vertex, "Vertex")
+    if otherName is None or vertexName is None:
+        sketch.MapMode = "Deactivated"
+        return
+    sketch.AttachmentSupport = [(base, vertexName), (base, edgeName), (base, otherName)]
+    sketch.MapMode = "OXY"
+
+
+def smRefreshWallShapeTilt(wall):
+    """Put the shape sketch on the wall's flat part, as last computed.
+
+    The tilt is a copy of the wall's angle, not an expression: the wall
+    depends on the sketch, so the sketch can't depend on the wall.
+    """
+    sketch = wall.ShapeSketch
+    if sketch is None:
+        return
+    target = wall.ShapeFrame
+    if sketch.MapMode == "Deactivated":
+        if not sketch.Placement.isSame(target, 1e-9):
+            sketch.Placement = target
+        return
+    engine = Part.AttachEngine("Attacher::AttachEngine3D")
+    engine.readParametersFromFeature(sketch)
+    engine.AttachmentOffset = FreeCAD.Placement()
+    attached = engine.calculateAttachedPlacement(sketch.Placement)
+    if attached is None:
+        return
+    offset = attached.inverse().multiply(target)
+    if not sketch.AttachmentOffset.isSame(offset, 1e-9):
+        sketch.AttachmentOffset = offset
+
+
+def smCreateWallShapeSketch(wall):
+    """Create the starting shape sketch: the wall's current outline.
+
+    Three lines (left side, top, right side) whose loose ends sit on the
+    reference line at the bend ends. Where Extend or a miter makes the flat
+    part differ from the bend, the side starts where the flat part starts and
+    a step joins it to the bend end, so the wall stays exactly the same.
+
+    Named dimensions: Gap1/Gap2 place construction points at the bend ends,
+    measured from the edge's start and from its far end, so the right side
+    follows when the edge changes length. Extend1/Extend2 place the sides
+    from those points, and Length is the height.
+    """
+    import Sketcher
+
+    doc = wall.Document
+    if wall.ShapeFrame.isIdentity():
+        wall.recompute()  # an older wall that hasn't stored its frame yet
+    base, edge, edgeName = smWallAttachmentEdge(wall)
+    sketch = doc.addObject("Sketcher::SketchObject", "WallShape")
+    body = SheetMetalTools.smGetParentBody(wall)
+    if body is not None:
+        body.insertObject(sketch, wall, False)
+    smAttachWallShapeSketch(sketch, wall)
+    wall.ShapeSketch = sketch
+    sketch.recompute()
+    smRefreshWallShapeTilt(wall)
+    sketch.recompute()
+    sketch.addExternal(base.Name, edgeName)
+    external = -2 - len(sketch.ExternalGeometry)  # external geometry counts down from -3
+    sketch.recompute()
+
+    V = FreeCAD.Vector
+    length = edge.Length
+    height = wall.length.Value
+    setback = wall.ShapeSetback.Value
+    gap1, gap2 = wall.gap1.Value, wall.gap2.Value
+    ext1, ext2 = wall.extend1.Value, wall.extend2.Value
+    miter1 = miter2 = 0.0
+    if not wall.AutoMiter:
+        miter1, miter2 = wall.miterangle1.Value, wall.miterangle2.Value
+    slant1 = (height - setback) * math.tan(math.radians(miter1))
+    slant2 = (height - setback) * math.tan(math.radians(miter2))
+    bend1, bend2 = gap1, length - gap2
+    side1, side2 = gap1 - ext1, length - gap2 + ext2
+    plain1 = abs(ext1) < smEpsilon and abs(miter1) < smEpsilon
+    plain2 = abs(ext2) < smEpsilon and abs(miter2) < smEpsilon
+    low1 = 0.0 if plain1 else setback
+    low2 = 0.0 if plain2 else setback
+
+    add = sketch.addGeometry
+    con = sketch.addConstraint
+    named = {}
+
+    def name(index, label):
+        sketch.renameConstraint(index, label)
+        named[label] = index
+
+    # Construction points at the bend ends.
+    point1 = add(Part.Point(V(bend1, 0, 0)), True)
+    point2 = add(Part.Point(V(bend2, 0, 0)), True)
+    con(Sketcher.Constraint("PointOnObject", point1, 1, -1))
+    con(Sketcher.Constraint("PointOnObject", point2, 1, -1))
+    name(con(Sketcher.Constraint("DistanceX", -1, 1, point1, 1, bend1)), "Gap1")
+    farPos = 2 if sketch.getPoint(external, 2).x > sketch.getPoint(external, 1).x else 1
+    name(con(Sketcher.Constraint("DistanceX", point2, 1, external, farPos, gap2)), "Gap2")
+
+    # Left side (with a step if needed), top, right side.
+    left = add(Part.LineSegment(V(side1, low1, 0), V(side1 + slant1, height, 0)))
+    top = add(Part.LineSegment(V(side1 + slant1, height, 0), V(side2 - slant2, height, 0)))
+    right = add(Part.LineSegment(V(side2 - slant2, height, 0), V(side2, low2, 0)))
+    con(Sketcher.Constraint("Coincident", left, 2, top, 1))
+    con(Sketcher.Constraint("Coincident", top, 2, right, 1))
+    con(Sketcher.Constraint("Horizontal", top))
+    name(con(Sketcher.Constraint("DistanceY", -1, 1, top, 1, height)), "Length")
+
+    for side, pos, plain, low, slant, step_to, sign, label in (
+            (left, 1, plain1, low1, slant1, bend1, 1, "Extend1"),
+            (right, 2, plain2, low2, slant2, bend2, -1, "Extend2")):
+        if abs(slant) < smEpsilon:
+            con(Sketcher.Constraint("Vertical", side))
+        else:
+            top_pos = 2 if pos == 1 else 1
+            con(Sketcher.Constraint("DistanceX", side, pos, side, top_pos, sign * slant))
+        point = point1 if pos == 1 else point2
+        if plain:
+            con(Sketcher.Constraint("PointOnObject", side, pos, -1))
+        else:
+            con(Sketcher.Constraint("DistanceY", -1, 1, side, pos, low))
+            sideX = side1 if pos == 1 else side2
+            if abs(sideX - step_to) > smEpsilon:
+                step = add(Part.LineSegment(V(step_to, low, 0), V(sideX, low, 0)))
+                con(Sketcher.Constraint("Coincident", step, 2, side, pos))
+                con(Sketcher.Constraint("Horizontal", step))
+                con(Sketcher.Constraint("Vertical", point, 1, step, 1))
+        if pos == 1:
+            name(con(Sketcher.Constraint("DistanceX", side, pos, point, 1, ext1)), label)
+        else:
+            name(con(Sketcher.Constraint("DistanceX", point, 1, side, pos, ext2)), label)
+
+    sketch.Visibility = False
+    doc.recompute()
+    return sketch
 
 
 ###################################################################################################
@@ -2082,6 +2536,47 @@ if SheetMetalTools.isGuiLoaded():
 
         def getTaskPanel(self, obj):
             return SMBendWallTaskPanel(obj)
+
+        def claimChildren(self):
+            children = super().claimChildren()
+            shapeSketch = getattr(self.Object, "ShapeSketch", None)
+            if shapeSketch is not None:
+                children.append(shapeSketch)
+            return children
+
+
+    class _WallShapeEditObserver:
+        """Brings Make Wall's task panel back when Sketcher closes."""
+
+        def __init__(self, wall, sketch):
+            self.wall, self.sketch = wall, sketch
+            Gui.addDocumentObserver(self)
+
+        def slotResetEdit(self, viewObject):
+            if viewObject.Object == self.sketch:
+                QtCore.QTimer.singleShot(0, self.reopenWallPanel)
+
+        def reopenWallPanel(self):
+            Gui.removeDocumentObserver(self)
+            if self.sketch.isValid() and self.sketch.ViewObject is not None:
+                self.sketch.ViewObject.Visibility = False
+            self.wall.Document.recompute()
+            Gui.ActiveDocument.setEdit(self.wall, 0)
+
+
+    def smStartWallShapeEdit(wall):
+        """Open Sketcher on the wall's shape sketch, creating it if needed."""
+        doc = wall.Document
+        doc.openTransaction("Edit wall shape")
+        sketch = wall.ShapeSketch
+        if sketch is None:
+            sketch = smCreateWallShapeSketch(wall)
+        smRefreshWallShapeTilt(wall)
+        doc.recompute()
+        doc.commitTransaction()
+        sketch.ViewObject.Visibility = True
+        _WallShapeEditObserver(wall, sketch)
+        Gui.ActiveDocument.setEdit(sketch, 0)
 
 
     class SMViewProviderFlat(SMViewProviderTree):
@@ -2160,6 +2655,94 @@ if SheetMetalTools.isGuiLoaded():
             # Button reversed wall.
             self.form.buttRevWall.clicked.connect(self.revWall)  # Button click action.
 
+            self.setupShapeWidgets()
+
+        # Wall shape (Edit Shape).
+        # Fields the starting shape sketch has a dimension for.
+        shapeFields = (("Length", "Length"), ("extend1", "Extend1"), ("extend2", "Extend2"),
+                       ("gap1", "Gap1"), ("gap2", "Gap2"))
+
+        def setupShapeWidgets(self):
+            box = QtGui.QGroupBox(translate("SheetMetal", "Wall shape"))
+            layout = QtGui.QHBoxLayout(box)
+            self.editShapeButton = QtGui.QPushButton(translate("SheetMetal", "Edit Shape"))
+            self.removeShapeButton = QtGui.QPushButton(translate("SheetMetal", "Remove Shape"))
+            layout.addWidget(self.editShapeButton)
+            layout.addWidget(self.removeShapeButton)
+            self.form.tab.layout().addWidget(box)
+            # Deferred, because accepting the panel deletes this button.
+            self.editShapeButton.clicked.connect(
+                lambda: QtCore.QTimer.singleShot(0, self.editShape))
+            self.removeShapeButton.clicked.connect(self.removeShape)
+            # The sketch may have been edited since: show its dimensions,
+            # which also copies them into the wall's own properties.
+            sketch = self.obj.ShapeSketch
+            if sketch is not None:
+                for fieldName, dimension in self.shapeFields:
+                    index = smFindNamedConstraint(sketch, dimension)
+                    if index is not None:
+                        getattr(self.form, fieldName).setProperty("value", sketch.getDatum(index))
+            self.shapeFieldTips = {}
+            for fieldName, dimension in self.shapeFields:
+                field = getattr(self.form, fieldName)
+                self.shapeFieldTips[fieldName] = field.toolTip()
+                field.valueChanged.connect(
+                    lambda _value, field=field, dimension=dimension:
+                        self.syncShapeDimension(field, dimension))
+            self.updateShapeWidgets()
+
+        def updateShapeWidgets(self):
+            sketch = self.obj.ShapeSketch
+            reason = smWallShapeUnavailableReason(self.obj)
+            self.editShapeButton.setEnabled(not reason)
+            self.editShapeButton.setToolTip(reason or translate(
+                "SheetMetal",
+                "Draw the wall's outline in a sketch, starting from its current shape"))
+            self.removeShapeButton.setEnabled(sketch is not None)
+            self.removeShapeButton.setToolTip(translate(
+                "SheetMetal", "Delete the shape sketch and go back to a plain wall"))
+            # Once the sketch no longer has a field's dimension, the sketch
+            # defines it and the field can't change it.
+            for fieldName, dimension in self.shapeFields:
+                field = getattr(self.form, fieldName)
+                defined = (sketch is not None and fieldName not in ("gap1", "gap2")
+                           and smFindNamedConstraint(sketch, dimension) is None)
+                field.setEnabled(not defined)
+                field.setToolTip(translate("SheetMetal", "Defined by the shape sketch")
+                                 if defined else self.shapeFieldTips[fieldName])
+            for widget in (self.form.autoMiterCheckbox, self.form.groupAutoMiter,
+                           self.form.groupManualMiter):
+                widget.setEnabled(sketch is None)
+            if sketch is None:
+                self.autoMiterChanged(self.obj.AutoMiter)
+
+        def syncShapeDimension(self, field, dimension):
+            """The panel's fields edit the starting sketch's named dimensions."""
+            sketch = self.obj.ShapeSketch
+            if sketch is None:
+                return
+            index = smFindNamedConstraint(sketch, dimension)
+            if index is None:
+                return
+            value = field.property("value")
+            value = value.Value if hasattr(value, "Value") else float(value)
+            sketch.setDatum(index, FreeCAD.Units.Quantity(value, FreeCAD.Units.Length))
+            self.obj.Document.recompute()
+
+        def editShape(self):
+            wall = self.obj
+            self.accept()
+            smStartWallShapeEdit(wall)
+
+        def removeShape(self):
+            sketch = self.obj.ShapeSketch
+            if sketch is None:
+                return
+            self.obj.ShapeSketch = None
+            self.obj.Document.removeObject(sketch.Name)
+            self.obj.Document.recompute()
+            self.updateShapeWidgets()
+
         # Turn bend type to 'Offset', on case of automatic face
         # reference selection.
         def onBendOffset(self, test):
@@ -2236,6 +2819,10 @@ if SheetMetalTools.isGuiLoaded():
             self.form.groupManualMiter.setEnabled(not isAutoMiter)
 
         def accept(self):
+            if self.obj.ShapeSketch is not None:
+                # Keep the (hidden) shape sketch standing on the wall.
+                self.obj.Document.recompute()
+                smRefreshWallShapeTilt(self.obj)
             SheetMetalTools.taskAccept(self)
             SheetMetalTools.taskSaveDefaults(self.obj, smAddWallDefaultVars)
             return True
