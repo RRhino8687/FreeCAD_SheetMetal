@@ -160,6 +160,32 @@ class TestWallShape(FeatureTestCase):
                           key=lambda e: e.CenterOfMass.distanceToPoint(self.plate.Shape.CenterOfMass))
                 self.assertLess(wall.Shape.distToShape(Part.Vertex(top.CenterOfMass))[0], 1e-6)
 
+    def test_starting_sketch_faces_the_picked_side(self):
+        """The sketch is seen from the side of the sheet the edge was picked on.
+
+        That face carries on through the bend, so for a wall going up from the
+        top edge it is the wall's inside face, and with Invert the outside.
+        """
+        s45 = math.sqrt(0.5)
+        top_right = ((PLATE_W, 0, THK), (PLATE_W, PLATE_L, THK))
+        cases = [
+            # label, edge, props, direction the viewer looks from
+            ("top edge, up", top_right, {}, (-1, 0, 0)),
+            ("top edge, inverted", top_right, {"invert": True}, (1, 0, 0)),
+            ("bottom edge, down", ((PLATE_W, 0, 0), (PLATE_W, PLATE_L, 0)), {}, (-1, 0, 0)),
+            ("other side of the plate", ((0, 0, THK), (0, PLATE_L, THK)), {}, (1, 0, 0)),
+            ("45 degrees", top_right, {"angle": 45.0}, (-s45, 0, s45)),
+            ("135 degrees", top_right, {"angle": 135.0}, (-s45, 0, -s45)),
+        ]
+        for label, edge, props, expected in cases:
+            with self.subTest(label):
+                wall = add_wall(self.doc, self.plate, edge=edge, **props)
+                sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
+                normal = sketch.getGlobalPlacement().Rotation.multVec(Vector(0, 0, 1))
+                self.assertGreater(normal.dot(Vector(*expected)), 0.999, f"normal {normal}")
+                self.assertEqual(sketch.solve(), 0)
+                self.assertValidSheet(wall)
+
     def test_custom_outlines(self):
         """Each outline gives the volume its flat pattern says, and a valid solid.
 

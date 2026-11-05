@@ -1256,6 +1256,29 @@ def smLengthSpecSetback(LengthSpec, bendA, bendR, thk):
     return 0.0
 
 
+def _smSketchRunsBackwards(edgeDir, faceDir, thkDir):
+    """True if the shape sketch's x runs from the edge's end to its start.
+
+    The sketch is seen from the side of the sheet the edge was picked on,
+    followed through the bend: its normal is -thkDir before bending, and
+    its y is faceDir. Its x must then be faceDir x -thkDir to stay
+    right-handed.
+    """
+    return faceDir.cross(thkDir * -1).dot(edgeDir) < 0
+
+
+def smShapeSketchReversed(selItemName, MainObject):
+    """The attachment edge, and whether the shape sketch's x runs against it."""
+    edge, selFace, _thk, _axis, thkDir = smEdge(selItemName, MainObject)
+    if thkDir is None:
+        # A side face was picked; same rule as getBendetail.
+        center = selFace.CenterOfMass
+        thkDir = center.sub(edge.Curve.value(edge.Curve.parameter(center))).normalize()
+    edgeDir = edge.valueAt(edge.LastParameter) - edge.valueAt(edge.FirstParameter)
+    edgeDir.normalize()
+    return edge, _smSketchRunsBackwards(edgeDir, selFace.normalAt(0, 0), thkDir)
+
+
 class SMWallShape:
     """The outline a shape sketch gives a wall (Edit Wall Shape).
 
@@ -1450,10 +1473,16 @@ def smBend(
 
     if wallShape:
         # The shape sketch decides where the bend runs, within Gap 1/2.
-        attachmentEdge = smEdge(selFaceNames[0], MainObject)[0]
+        # Gap 1 is at the edge's own start, which is the sketch's right end
+        # when the sketch runs the other way along the edge.
+        attachmentEdge, backwards = smShapeSketchReversed(selFaceNames[0], MainObject)
         shapeEdgeLength = attachmentEdge.Length
-        shapeBendStart, shapeBendEnd = wallShape.bendSpan(shapeEdgeLength, gap1, gap2)
-        gap1, gap2 = shapeBendStart, shapeEdgeLength - shapeBendEnd
+        leftGap, rightGap = (gap2, gap1) if backwards else (gap1, gap2)
+        shapeBendStart, shapeBendEnd = wallShape.bendSpan(shapeEdgeLength, leftGap, rightGap)
+        if backwards:
+            gap1, gap2 = shapeEdgeLength - shapeBendEnd, shapeBendStart
+        else:
+            gap1, gap2 = shapeBendStart, shapeEdgeLength - shapeBendEnd
         extend1 = extend2 = 0.0
 
     nogaptrimedgelist = []
@@ -1701,12 +1730,17 @@ def smBend(
         else:
             revAxisP = lenEdge.valueAt(lenEdge.FirstParameter) + thkDir * -bendR
 
-        # The shape sketch's frame: x along the attachment edge from its
-        # start, y along the flat part. `P0` is the edge's start moved onto
-        # the line the bend starts from (Bend Type can move that line).
+        # The shape sketch's frame: x along the attachment edge, y along the
+        # flat part, seen from the side the edge was picked on (see
+        # smShapeSketchReversed). `P0` is the end of the edge the sketch's x
+        # starts from, moved onto the line the bend starts from (Bend Type
+        # can move that line).
         edgeStart = AlenEdge.valueAt(AlenEdge.FirstParameter)
         edgeDir = AlenEdge.valueAt(AlenEdge.LastParameter) - edgeStart
         edgeDir.normalize()
+        if _smSketchRunsBackwards(edgeDir, FaceDir, thkDir):
+            edgeStart = AlenEdge.valueAt(AlenEdge.LastParameter)
+            edgeDir = edgeDir * -1
         P0 = noGap_lenEdge.Curve.value(noGap_lenEdge.Curve.parameter(edgeStart))
         if shapeInfo is not None and i == 0:
             # Where the sketch is shown: on the flat part's plane, with its
@@ -2374,16 +2408,17 @@ def _smElementName(shape, element, kind):
     return None
 
 
-def smAttachWallShapeSketch(sketch, wall):
-    """Attach the sketch at the start of the attachment edge (Align O-X-Y).
+def smAttachWallShapeSketch(sketch, wall, fromEnd=False):
+    """Attach the sketch at the end of the attachment edge its x starts from
+    (Align O-X-Y): the edge's start, or its end if `fromEnd`.
 
     The sketch then moves with the edge. Its tilt to the wall's angle is the
     AttachmentOffset, refreshed by smRefreshWallShapeTilt().
     """
     base, edge, edgeName = smWallAttachmentEdge(wall)
-    start = edge.valueAt(edge.FirstParameter)
+    start = edge.valueAt(edge.LastParameter if fromEnd else edge.FirstParameter)
     vertex = min(base.Shape.Vertexes, key=lambda v: (v.Point - start).Length)
-    edgeDir = edge.valueAt(edge.LastParameter) - start
+    edgeDir = edge.valueAt(edge.LastParameter) - edge.valueAt(edge.FirstParameter)
     edgeDir.normalize()
     otherName = None
     for other in base.Shape.ancestorsOfType(vertex, Part.Edge):
@@ -2435,9 +2470,12 @@ def smCreateWallShapeSketch(wall):
     a step joins it to the bend end, so the wall stays exactly the same.
 
     Named dimensions: Gap1/Gap2 place construction points at the bend ends,
-    measured from the edge's start and from its far end, so the right side
-    follows when the edge changes length. Extend1/Extend2 place the sides
-    from those points, and Length is the height.
+    measured from the sketch's origin and from the edge's far end, so the
+    right side follows when the edge changes length. Extend1/Extend2 place
+    the sides from those points, and Length is the height.
+
+    The sketch is seen from the side the edge was picked on, so it may run
+    backwards along the edge; then the wall's Gap 1 side is on its right.
     """
     import Sketcher
 
@@ -2445,11 +2483,13 @@ def smCreateWallShapeSketch(wall):
     if wall.ShapeFrame.isIdentity():
         wall.recompute()  # an older wall that hasn't stored its frame yet
     base, edge, edgeName = smWallAttachmentEdge(wall)
+    edgeDir = edge.valueAt(edge.LastParameter) - edge.valueAt(edge.FirstParameter)
+    backwards = wall.ShapeFrame.Rotation.multVec(FreeCAD.Vector(1, 0, 0)).dot(edgeDir) < 0
     sketch = doc.addObject("Sketcher::SketchObject", "WallShape")
     body = SheetMetalTools.smGetParentBody(wall)
     if body is not None:
         body.insertObject(sketch, wall, False)
-    smAttachWallShapeSketch(sketch, wall)
+    smAttachWallShapeSketch(sketch, wall, backwards)
     wall.ShapeSketch = sketch
     sketch.recompute()
     smRefreshWallShapeTilt(wall)
@@ -2467,6 +2507,11 @@ def smCreateWallShapeSketch(wall):
     miter1 = miter2 = 0.0
     if not wall.AutoMiter:
         miter1, miter2 = wall.miterangle1.Value, wall.miterangle2.Value
+    # From here on, 1 is the sketch's left (x = 0) and 2 its right.
+    names = {"Gap1": "Gap1", "Gap2": "Gap2", "Extend1": "Extend1", "Extend2": "Extend2"}
+    if backwards:
+        gap1, gap2, ext1, ext2, miter1, miter2 = gap2, gap1, ext2, ext1, miter2, miter1
+        names = {"Gap1": "Gap2", "Gap2": "Gap1", "Extend1": "Extend2", "Extend2": "Extend1"}
     slant1 = (height - setback) * math.tan(math.radians(miter1))
     slant2 = (height - setback) * math.tan(math.radians(miter2))
     bend1, bend2 = gap1, length - gap2
@@ -2489,9 +2534,10 @@ def smCreateWallShapeSketch(wall):
     point2 = add(Part.Point(V(bend2, 0, 0)), True)
     con(Sketcher.Constraint("PointOnObject", point1, 1, -1))
     con(Sketcher.Constraint("PointOnObject", point2, 1, -1))
-    name(con(Sketcher.Constraint("DistanceX", -1, 1, point1, 1, bend1)), "Gap1")
+    name(con(Sketcher.Constraint("DistanceX", -1, 1, point1, 1, bend1)), names["Gap1"])
     farPos = 2 if sketch.getPoint(external, 2).x > sketch.getPoint(external, 1).x else 1
-    name(con(Sketcher.Constraint("DistanceX", point2, 1, external, farPos, gap2)), "Gap2")
+    name(con(Sketcher.Constraint("DistanceX", point2, 1, external, farPos, gap2)),
+         names["Gap2"])
 
     # Left side (with a step if needed), top, right side.
     left = add(Part.LineSegment(V(side1, low1, 0), V(side1 + slant1, height, 0)))
@@ -2509,8 +2555,8 @@ def smCreateWallShapeSketch(wall):
     name(con(Sketcher.Constraint("Distance", anchor, 1, top, height)), "Length")
 
     for side, pos, plain, low, slant, step_to, sign, label in (
-            (left, 1, plain1, low1, slant1, bend1, 1, "Extend1"),
-            (right, 2, plain2, low2, slant2, bend2, -1, "Extend2")):
+            (left, 1, plain1, low1, slant1, bend1, 1, names["Extend1"]),
+            (right, 2, plain2, low2, slant2, bend2, -1, names["Extend2"])):
         if abs(slant) < smEpsilon:
             con(Sketcher.Constraint("Vertical", side))
         else:
