@@ -300,12 +300,11 @@ class TestMakeWall(FeatureTestCase):
                     self.assertAlmostEqual(upper.BoundBox.YMin, 10.0, places=3)
                     self.assertAlmostEqual(upper.BoundBox.YMax, PLATE_L - 5.0, places=3)
 
-    @unittest.expectedFailure
     def test_closed_sketch_wall(self):
-        """Known bug #601: a closed sketch on the plate's edge face should shape the wall.
+        """#601: a closed sketch on the plate's edge face builds a valid wall.
 
-        Fails first on Sketch.Support (renamed AttachmentSupport in FreeCAD 1.0),
-        then because smBend never builds mainlist for closed sketches.
+        Crashed until 9d6bae8. The wall's outline isn't checked here, because
+        this mode is due to be replaced (see the Edit Wall Shape prototype).
         """
         thin_face = face_name(self.plate.Shape, lambda f: f.normalAt(0, 0).x > 0.99)
         sketch = self.doc.addObject("Sketcher::SketchObject", "WallOutline")
