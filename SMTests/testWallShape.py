@@ -131,6 +131,9 @@ class TestWallShape(FeatureTestCase):
             ("gaps", {"gap1": 5.0, "gap2": 10.0}),
             ("extends", {"gap1": 8.0, "gap2": 8.0, "extend1": 3.0, "extend2": -2.0}),
             ("manual miter", {"AutoMiter": False, "miterangle1": 20.0}),
+            ("miter and negative Extend", {"AutoMiter": False, "miterangle2": 15.0,
+                                           "gap2": 6.0, "extend2": -3.0}),
+            ("negative (widening) miter", {"AutoMiter": False, "miterangle1": -15.0}),
         ]
         for label, props in cases:
             with self.subTest(label):
@@ -175,10 +178,11 @@ class TestWallShape(FeatureTestCase):
         """Setting Gap A/B and Extend A/B on a shaped wall, as the task panel
         does, gives exactly the wall Make Wall makes with the same values.
 
-        A negative Extend is the exception: it moves a loose end inside the
-        bend span, which narrows the bend (see test_custom_outlines).
+        Miters and negative Extends are set on the wall only; the wall applies
+        them where the flat part starts.
         """
         fields = {"gap1": "GapA", "gap2": "GapB", "extend1": "ExtendA", "extend2": "ExtendB"}
+        # The panel's miter and negative Extend values go to the wall only.
         cases = [
             ({"gap1": 5.0, "gap2": 10.0}, "Leg"),
             ({"extend1": 3.0, "extend2": 2.0}, "Leg"),
@@ -186,6 +190,8 @@ class TestWallShape(FeatureTestCase):
             ({"gap1": 5.0, "gap2": 10.0}, "Outer Sharp"),
             ({"extend1": 3.0, "extend2": 2.0}, "Outer Sharp"),
             ({"gap1": 5.0, "extend1": 2.0}, "Outer Sharp"),
+            ({"AutoMiter": False, "miterangle1": 20.0, "miterangle2": 10.0}, "Outer Sharp"),
+            ({"gap1": 5.0, "extend1": -2.0}, "Outer Sharp"),
         ]
         for values, spec in cases:
             with self.subTest(values=values, spec=spec):
@@ -194,12 +200,84 @@ class TestWallShape(FeatureTestCase):
                 sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
                 for prop, value in values.items():
                     setattr(wall, prop, value)
-                    sketch.setDatum(SheetMetalCmd.smFindNamedConstraint(sketch, fields[prop]),
-                                    FreeCAD.Units.Quantity(value, FreeCAD.Units.Length))
+                    if prop in fields:
+                        if prop.startswith("extend"):
+                            value = max(value, 0.0)
+                        sketch.setDatum(SheetMetalCmd.smFindNamedConstraint(sketch, fields[prop]),
+                                        FreeCAD.Units.Quantity(value, FreeCAD.Units.Length))
                 self.doc.recompute()
                 self.assertValidSheet(wall)
                 self.assertLess(plain.cut(wall.Shape).Volume + wall.Shape.cut(plain).Volume, 0.01)
                 self.assertEqual(len(wall.Shape.Faces), len(plain.Faces), "face count")
+
+    def test_miters_and_negative_extend_follow_the_wall(self):
+        """Miters and negative Extends stay on the wall and start where the flat
+        part starts, so they stay exact when that line moves (radius, angle,
+        Length Spec) or Length changes.
+        """
+        starts = [
+            ("miter A 20", {"AutoMiter": False, "miterangle1": 20.0}),
+            ("miters A 20 / B 10", {"AutoMiter": False, "miterangle1": 20.0, "miterangle2": 10.0}),
+            ("negative Extend A", {"gap1": 5.0, "extend1": -2.0}),
+            ("miter and negative Extend", {"AutoMiter": False, "miterangle1": 20.0,
+                                           "gap1": 5.0, "extend1": -2.0}),
+            ("miter and positive Extend", {"AutoMiter": False, "miterangle2": 20.0, "extend2": 3.0}),
+        ]
+        changes = [
+            ("Length 20->30", {"length": 30.0}),
+            ("radius 1->3", {"radius": 3.0}),
+            ("angle 90->60", {"angle": 60.0}),
+            ("Length Spec Leg", {"LengthSpec": "Leg"}),
+        ]
+        for slabel, start in starts:
+            for clabel, change in changes:
+                with self.subTest(start=slabel, change=clabel):
+                    base = dict(start, LengthSpec="Outer Sharp")
+                    plain = add_wall(self.doc, self.plate, **dict(base, **change)).Shape
+                    wall = add_wall(self.doc, self.plate, **base)
+                    sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
+                    for prop, value in change.items():
+                        setattr(wall, prop, value)
+                        if prop == "length":  # the task panel also edits the sketch's Length
+                            sketch.setDatum(SheetMetalCmd.smFindNamedConstraint(sketch, "Length"),
+                                            FreeCAD.Units.Quantity(value, FreeCAD.Units.Length))
+                    self.doc.recompute()
+                    self.assertValidSheet(wall)
+                    self.assertLess(plain.cut(wall.Shape).Volume + wall.Shape.cut(plain).Volume, 0.01)
+                    self.assertEqual(len(wall.Shape.Faces), len(plain.Faces), "face count")
+
+    def test_miter_rules_on_a_custom_outline(self):
+        """A miter keeps nothing of the flat part outside its line."""
+        steep = [(0, 0), (12, 20), (88, 20), (100, 0)]  # sides already slanting in by 31 degrees
+        tee = [(0, 0), (0, 10), (-10, 10), (-10, 20), (110, 20), (110, 10), (100, 10), (100, 0)]
+        with self.subTest("a steeper slant in the sketch is left alone"):
+            unmitered = self.shaped_wall(steep).Shape.Volume
+            wall = self.shaped_wall(steep, AutoMiter=False, miterangle1=10.0, miterangle2=10.0)
+            self.assertValidSheet(wall)
+            self.assertAlmostEqual(wall.Shape.Volume, unmitered, delta=0.01)
+        with self.subTest("an overhang outside the miter line is cut off"):
+            wall = self.shaped_wall(tee, AutoMiter=False, miterangle1=10.0, miterangle2=10.0)
+            self.assertValidSheet(wall)
+            upper = upper_part(wall).BoundBox
+            self.assertGreater(upper.YMin, 0.0)
+            self.assertLess(upper.YMax, PLATE_L)
+        with self.subTest("a negative miter is refused"):
+            wall = self.shaped_wall(tee, AutoMiter=False, miterangle1=-10.0)
+            self.assertIn("negative miter", wall.getStatusString())
+        with self.subTest("trimming away the whole flat part is refused"):
+            wall = self.shaped_wall([(0, 0), (0, 20), (100, 20), (100, 0)], extend1=-150.0)
+            self.assertIn("whole flat part", wall.getStatusString())
+
+    def test_negative_miter_is_drawn_into_the_sketch(self):
+        """A shaped wall can't widen with a miter, so a negative miter goes into
+        the starting sketch and the wall's own value is reset."""
+        wall = add_wall(self.doc, self.plate, AutoMiter=False, miterangle1=-15.0)
+        plain = wall.Shape.copy()
+        SheetMetalCmd.smCreateWallShapeSketch(wall)
+        self.doc.recompute()
+        self.assertValidSheet(wall)
+        self.assertEqual(wall.miterangle1.Value, 0.0)
+        self.assertLess(plain.cut(wall.Shape).Volume + wall.Shape.cut(plain).Volume, 0.01)
 
     def test_starting_sketch_stands_on_the_wall(self):
         """Edit Shape shows the sketch on the wall's flat part (ADR 0001)."""

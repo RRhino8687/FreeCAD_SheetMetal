@@ -1402,6 +1402,43 @@ class SMWallShape:
         return self._band(face, box.XMin - 1, box.XMax + 1, 0.0, box.YMax + 1)
 
     @staticmethod
+    def trimFlatPart(outline, flatStart, left, right):
+        """Apply the wall's miters and negative Extends to the outline.
+
+        `left` and `right` are (miter angle, inset) for each side of the
+        sketch. As in Make Wall, each starts where the outline meets the line
+        the flat part starts on, moved in by the inset (a negative Extend),
+        and slants inwards by the miter angle. Nothing in the flat part
+        outside that line is kept; the bend is never cut.
+        """
+        box = outline.BoundBox
+        if box.YMax <= flatStart + smEpsilon:
+            return outline
+        line = Part.makeLine(FreeCAD.Vector(box.XMin - 1, flatStart, 0),
+                             FreeCAD.Vector(box.XMax + 1, flatStart, 0))
+        xs = [v.Point.x for v in outline.section(line).Vertexes]
+        if not xs:
+            return outline
+        height = box.YMax - flatStart + 1
+        for (angle, inset), start, sign in ((left, min(xs), 1), (right, max(xs), -1)):
+            if angle < smEpsilon and inset < smEpsilon:
+                continue
+            x = start + sign * inset
+            top = x + sign * height * math.tan(math.radians(angle))
+            far = (min(box.XMin, x, top) - 2) if sign == 1 else (max(box.XMax, x, top) + 2)
+            cut = Part.Face(Part.makePolygon([
+                FreeCAD.Vector(x, flatStart, 0), FreeCAD.Vector(top, flatStart + height, 0),
+                FreeCAD.Vector(far, flatStart + height, 0), FreeCAD.Vector(far, flatStart, 0),
+                FreeCAD.Vector(x, flatStart, 0)]))
+            outline = outline.cut(cut)
+        remaining = SMWallShape._band(outline, box.XMin - 1, box.XMax + 1,
+                                      flatStart, box.YMax + 1).Faces
+        if not remaining:
+            raise SheetMetalTools.SMException(translate(
+                "SheetMetal", "The wall's miters or negative Extends cut away its whole flat part."))
+        return outline
+
+    @staticmethod
     def _startAtFlatPart(chain, looseEnd, flatStart):
         """Cut the chain's end edge at `looseEnd` so it starts where the flat
         part starts. Returns (chain, new loose end), or None if that edge
@@ -1530,6 +1567,16 @@ def smBend(
             gap1, gap2 = shapeEdgeLength - shapeBendEnd, shapeBendStart
         else:
             gap1, gap2 = shapeBendStart, shapeEdgeLength - shapeBendEnd
+        # Miters and negative Extends stay the wall's own settings: the wall
+        # trims the flat part with them, from the line where the flat part
+        # starts (SMWallShape.trimFlatPart). A positive Extend is in the sketch.
+        if not automiter and (miterA1 < -smEpsilon or miterA2 < -smEpsilon):
+            raise SheetMetalTools.SMException(translate(
+                "SheetMetal", "A shaped wall can't widen with a negative miter: draw the "
+                "wider side in the shape sketch instead."))
+        trimA = (0.0 if automiter else miterA1, max(-extend1, 0.0))
+        trimB = (0.0 if automiter else miterA2, max(-extend2, 0.0))
+        shapeTrimLeft, shapeTrimRight = (trimB, trimA) if backwards else (trimA, trimB)
         extend1 = extend2 = 0.0
 
     nogaptrimedgelist = []
@@ -1810,6 +1857,8 @@ def smBend(
                 P0, FreeCAD.Rotation(edgeDir, FaceDir, edgeDir.cross(FaceDir), "ZXY")).toMatrix()
             outline = wallShape.flatOutline(shapeBendStart, shapeBendEnd, unfoldLength - setback,
                                             unfoldLength)
+            outline = SMWallShape.trimFlatPart(outline, unfoldLength,
+                                               shapeTrimLeft, shapeTrimRight)
             bendFace, flatFaces = wallShape.split(outline, unfoldLength)
             if unfold:
                 for face in outline.Faces:
@@ -2195,8 +2244,7 @@ class SMBendWall:
                 None, "ParametersShape", readOnly=True, isHiddden=True, attribs=8)
 
     # Properties the shape sketch takes over; hidden while there is one.
-    shapeReplacedProperties = ("length", "extend1", "extend2", "miterangle1", "miterangle2",
-                               "AutoMiter", "minGap", "maxExtendDist")
+    shapeReplacedProperties = ("length", "extend1", "extend2")
 
     def onChanged(self, fp, prop):
         if prop == "ShapeSketch":
@@ -2573,16 +2621,20 @@ def smCreateWallShapeSketch(wall):
     if backwards:
         gap1, gap2, ext1, ext2, miter1, miter2 = gap2, gap1, ext2, ext1, miter2, miter1
         names = {"Gap1": "GapB", "Gap2": "GapA", "Extend1": "ExtendB", "Extend2": "ExtendA"}
-    slant1 = (height - setback) * math.tan(math.radians(miter1))
-    slant2 = (height - setback) * math.tan(math.radians(miter2))
+    # Miters and negative Extends stay on the wall, which applies them where
+    # the flat part starts (SMWallShape.trimFlatPart), so the sketch's sides
+    # stay plain. Only a negative (widening) miter, which a shaped wall can't
+    # apply, is drawn into the sketch, once, starting where the flat part
+    # starts; the wall's own value for it is then set to 0.
+    bake1, bake2 = miter1 < -smEpsilon, miter2 < -smEpsilon
+    slant1 = (height - setback) * math.tan(math.radians(miter1)) if bake1 else 0.0
+    slant2 = (height - setback) * math.tan(math.radians(miter2)) if bake2 else 0.0
+    ext1, ext2 = max(ext1, 0.0), max(ext2, 0.0)
     bend1, bend2 = gap1, length - gap2
     side1, side2 = gap1 - ext1, length - gap2 + ext2
-    # A plain side's loose end sits on the reference line; Extend >= 0 then
-    # works like Make Wall's Extend (see SMWallShape.flatOutline). A miter or
-    # a negative Extend needs the side to start where the flat part starts,
-    # with a step from the bend end.
-    plain1 = ext1 > -smEpsilon and abs(miter1) < smEpsilon
-    plain2 = ext2 > -smEpsilon and abs(miter2) < smEpsilon
+    # A plain side's loose end sits on the reference line; Extend then works
+    # like Make Wall's Extend (see SMWallShape.flatOutline).
+    plain1, plain2 = not bake1, not bake2
     low1 = 0.0 if plain1 else setback
     low2 = 0.0 if plain2 else setback
 
@@ -2651,6 +2703,10 @@ def smCreateWallShapeSketch(wall):
         index = named.get(label)
         if index is not None:
             sketch.setLabelDistance(index, rank * spacing)
+    for baked, prop in ((bake1, "miterangle2" if backwards else "miterangle1"),
+                        (bake2, "miterangle1" if backwards else "miterangle2")):
+        if baked:
+            setattr(wall, prop, 0.0)
     sketch.Visibility = False
     wall.ShapeSketch = sketch
     doc.recompute()
@@ -2864,8 +2920,13 @@ if SheetMetalTools.isGuiLoaded():
             if sketch is not None:
                 for fieldName, dimension in self.shapeFields:
                     index = smFindNamedConstraint(sketch, dimension)
-                    if index is not None:
-                        getattr(self.form, fieldName).setProperty("value", sketch.getDatum(index))
+                    if index is None:
+                        continue
+                    value = sketch.getDatum(index)
+                    if (fieldName.startswith("extend") and value.Value < smEpsilon
+                            and getattr(self.obj, fieldName).Value < 0):
+                        continue  # a negative Extend lives on the wall
+                    getattr(self.form, fieldName).setProperty("value", value)
             self.shapeFieldTips = {}
             for fieldName, dimension in self.shapeFields:
                 field = getattr(self.form, fieldName)
@@ -2894,11 +2955,7 @@ if SheetMetalTools.isGuiLoaded():
                 field.setEnabled(not defined)
                 field.setToolTip(translate("SheetMetal", "Defined by the shape sketch")
                                  if defined else self.shapeFieldTips[fieldName])
-            for widget in (self.form.autoMiterCheckbox, self.form.groupAutoMiter,
-                           self.form.groupManualMiter):
-                widget.setEnabled(sketch is None)
-            if sketch is None:
-                self.autoMiterChanged(self.obj.AutoMiter)
+            self.autoMiterChanged(self.obj.AutoMiter)
 
         def syncShapeDimension(self, field, dimension):
             """The panel's fields edit the starting sketch's named dimensions."""
@@ -2910,6 +2967,8 @@ if SheetMetalTools.isGuiLoaded():
                 return
             value = field.property("value")
             value = value.Value if hasattr(value, "Value") else float(value)
+            if dimension.startswith("Extend"):
+                value = max(value, 0.0)  # a negative Extend is applied by the wall
             sketch.setDatum(index, FreeCAD.Units.Quantity(value, FreeCAD.Units.Length))
             self.obj.Document.recompute()
 
