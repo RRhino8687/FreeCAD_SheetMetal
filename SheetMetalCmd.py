@@ -2717,13 +2717,14 @@ if SheetMetalTools.isGuiLoaded():
         _WallOutlineEditObserver(wall, sketch)
         Gui.ActiveDocument.setEdit(sketch, 0)
         if smOutlineFacesInside(wall):
-            # Sketcher looks at the sketch from the inside of the bend: turn
-            # the camera around the sketch's y-axis to look from the outside.
-            # The sketch doesn't change; its x-axis just runs right to left.
+            # Sketcher has just turned the camera to face the sketch, which
+            # faces the inside of the bend. Before anything is drawn, turn it
+            # around the sketch's y-axis instead, to look from the outside;
+            # this replaces Sketcher's turn, so the view never shows the
+            # inside. The sketch doesn't change; its x-axis runs right to left.
             behind = sketch.getGlobalPlacement().Rotation.multiply(
                 FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 180))
-            QtCore.QTimer.singleShot(
-                0, lambda: Gui.ActiveDocument.ActiveView.setCameraOrientation(behind))
+            Gui.ActiveDocument.ActiveView.setCameraOrientation(behind)
 
 
     class SMViewProviderFlat(SMViewProviderTree):
