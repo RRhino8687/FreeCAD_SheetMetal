@@ -109,8 +109,11 @@ class TestWallOutline(FeatureTestCase):
         self.plate = make_plate(self.doc)
 
     def outline_wall(self, chain, **props):
+        """A wall with an outline sketch of this chain, its bend ends at the wall's gaps."""
         wall = add_wall(self.doc, self.plate, **props)
-        wall.OutlineSketch = outline_sketch(self.doc, chain)
+        sketch = outline_sketch(self.doc, chain)
+        SheetMetalCmd.smAddBendEndPoints(sketch, wall)
+        wall.OutlineSketch = sketch
         self.doc.recompute()
         return wall
 
@@ -130,6 +133,7 @@ class TestWallOutline(FeatureTestCase):
             ("135 degrees, Outer Sharp", {"angle": 135.0, "LengthSpec": "Outer Sharp"}),
             ("gaps", {"gap1": 5.0, "gap2": 10.0}),
             ("extends", {"gap1": 8.0, "gap2": 8.0, "extend1": 3.0, "extend2": -2.0}),
+            ("negative gaps", {"gap1": -5.0, "gap2": -3.0, "extend1": 5.0}),
         ]
         for label, props in cases:
             with self.subTest(label):
@@ -389,6 +393,7 @@ class TestWallOutline(FeatureTestCase):
                     sketch.addGeometry(Part.ArcOfCircle(
                         Part.Circle(Vector(50, 10, 0), Vector(0, 0, 1), 50), 0, math.pi))
                     sketch.addGeometry(Part.LineSegment(Vector(100, 10, 0), Vector(100, 0, 0)))
+                    SheetMetalCmd.smAddBendEndPoints(sketch, wall)
                     wall.OutlineSketch = sketch
                     self.doc.recompute()
                     area = 100 * (10 + ba - setback) + math.pi * 50 ** 2 / 2
@@ -522,6 +527,42 @@ class TestWallOutline(FeatureTestCase):
         self.assertValidSheet(wall)
         self.assertAlmostEqual(upper_part(wall).BoundBox.YMin, 10.0 - 1.0, places=3)
 
+    def test_gap_is_where_the_bend_end_point_is(self):
+        """Gap A/B are where the sketch's bend-end points are, so the wall's own
+        gap doesn't count (and is hidden). Deleting a Gap dimension changes
+        nothing; the panel field then moves the point instead, and the side
+        tied to it by Extend moves too.
+        """
+        def difference(a, b):
+            return a.cut(b).Volume + b.cut(a).Volume
+
+        for side, gap, extend in (("A", "gap1", "extend1"), ("B", "gap2", "extend2")):
+            with self.subTest(side):
+                wall = add_wall(self.doc, self.plate, **{gap: 4.0, extend: 1.0})
+                plain = wall.Shape.copy()
+                sketch = SheetMetalCmd.smCreateWallOutlineSketch(wall)
+                self.assertAlmostEqual(SheetMetalCmd.smOutlineSketchGap(wall, side), 4.0)
+                setattr(wall, gap, 20.0)
+                self.doc.recompute()
+                self.assertEqual(wall.getEditorMode(gap), ["Hidden"])
+                self.assertLess(difference(plain, wall.Shape), 0.01)
+                sketch.delConstraint(SheetMetalCmd.smFindNamedConstraint(sketch, "Gap" + side))
+                self.doc.recompute()
+                self.assertValidSheet(wall)
+                self.assertLess(difference(plain, wall.Shape), 0.01)
+                self.assertTrue(SheetMetalCmd.smMoveOutlineBendEnd(wall, side, 10.0))
+                self.doc.recompute()
+                self.assertValidSheet(wall)
+                self.assertAlmostEqual(SheetMetalCmd.smOutlineSketchGap(wall, side), 10.0)
+                moved = add_wall(self.doc, self.plate, **{gap: 10.0, extend: 1.0}).Shape
+                self.assertLess(difference(moved, wall.Shape), 0.01)
+                # Past the end of the edge, as a negative gap allows.
+                SheetMetalCmd.smMoveOutlineBendEnd(wall, side, -3.0)
+                self.doc.recompute()
+                self.assertValidSheet(wall)
+                past = add_wall(self.doc, self.plate, **{gap: -3.0, extend: 1.0}).Shape
+                self.assertLess(difference(past, wall.Shape), 0.01)
+
     def test_length_survives_editing_a_top_corner(self):
         """Trimming or rounding either top corner keeps the Length dimension.
 
@@ -577,6 +618,7 @@ class TestWallOutline(FeatureTestCase):
         wall = add_wall(self.doc, self.plate)
         plain_volume = wall.Shape.Volume
         sketch = outline_sketch(self.doc, [(30, 0), (30, 15), (70, 15), (70, 0)])
+        SheetMetalCmd.smAddBendEndPoints(sketch, wall)
         wall.OutlineSketch = sketch
         self.doc.recompute()
         self.assertNotAlmostEqual(wall.Shape.Volume, plain_volume, places=0)
@@ -613,6 +655,19 @@ class TestWallOutline(FeatureTestCase):
                 wall = self.outline_wall(chain, **props)
                 self.assertIn("Invalid", wall.State)
                 self.assertIn(message, wall.getStatusString())
+        missing = "needs its two bend-end points"
+        with self.subTest("bend-end point deleted"):
+            wall = add_wall(self.doc, self.plate)
+            sketch = SheetMetalCmd.smCreateWallOutlineSketch(wall)
+            sketch.delGeometry(SheetMetalCmd.smOutlineBendEnd(sketch, "A")[0])
+            self.doc.recompute()
+            self.assertIn(missing, wall.getStatusString())
+            self.assertFalse(SheetMetalCmd.smMoveOutlineBendEnd(wall, "A", 5.0))
+        with self.subTest("sketch without bend-end points"):
+            wall = add_wall(self.doc, self.plate)
+            wall.OutlineSketch = outline_sketch(self.doc, [(0, 0), (0, 10), (100, 10), (100, 0)])
+            self.doc.recompute()
+            self.assertIn(missing, wall.getStatusString())
         with self.subTest("two pieces"):
             wall = add_wall(self.doc, self.plate)
             sketch = outline_sketch(self.doc, [(0, 0), (0, 10)])

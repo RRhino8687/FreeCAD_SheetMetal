@@ -1324,14 +1324,28 @@ class SMWallOutline:
                 "SheetMetal", "The outline sketch dips below the reference line, onto the sheet."))
         ends = [self.chain.OrderedVertexes[0].Point, self.chain.OrderedVertexes[-1].Point]
         self.leftEnd, self.rightEnd = sorted(ends, key=lambda p: p.x)
+        # Where the sketch's points marking the bend ends are, by side ("A"
+        # or "B"): Gap A/B are where these points are (smOutlineBendEnd).
+        self.bendEnds = {}
+        for side in ("A", "B"):
+            point = smOutlineBendEnd(sketch, side)
+            if point is None:
+                raise SheetMetalTools.SMException(translate(
+                    "SheetMetal",
+                    "The outline sketch needs its two bend-end points: the construction points "
+                    "kept on the reference line by BendEndA and BendEndB. Undo deleting them, "
+                    "or start a new sketch with Remove Outline and Edit Outline."))
+            self.bendEnds[side] = sketch.getPoint(*point).x
 
-    def bendSpan(self, edgeLength, gap1, gap2):
+    def bendSpan(self, sides):
         """Where the bend runs along the attachment edge, as (start, end).
 
-        Gap 1 and Gap 2 are the outer limits. A loose end that sits on the
-        reference line inside them moves the bend end on its side to it.
+        The sketch's bend-end points are the outer limits; `sides` names the
+        sketch's left and right sides. A loose end that sits on the reference
+        line inside them moves the bend end on its side to it.
         """
-        start, end = gap1, edgeLength - gap2
+        # A bend end may be past the end of the edge, as a negative gap allows.
+        start, end = self.bendEnds[sides[0]], self.bendEnds[sides[1]]
         if abs(self.leftEnd.y) < smEpsilon and start < self.leftEnd.x < end:
             start = self.leftEnd.x
         if abs(self.rightEnd.y) < smEpsilon and start < self.rightEnd.x < end:
@@ -1544,10 +1558,9 @@ def smBend(
     if wallOutline or outlineInfo is not None:
         attachmentEdge, backwards = smOutlineSketchReversed(selFaceNames[0], MainObject)
     if wallOutline:
-        # The outline sketch decides where the bend runs, within Gap 1/2.
+        # The outline sketch decides where the bend runs, within its bend-end points.
         outlineEdgeLength = attachmentEdge.Length
-        outlineBendStart, outlineBendEnd = wallOutline.bendSpan(
-            outlineEdgeLength, *smSketchSides(backwards, gap1, gap2))
+        outlineBendStart, outlineBendEnd = wallOutline.bendSpan(smSketchSides(backwards, "A", "B"))
         gap1, gap2 = smSketchSides(backwards, outlineBendStart, outlineEdgeLength - outlineBendEnd)
         # A wall with an outline sketch has no miters: angled sides are drawn in the sketch.
         # A negative Extend stays the wall's own setting, applied from the
@@ -2190,8 +2203,8 @@ class SMBendWall:
 
     # Properties the outline sketch takes over; hidden while there is one. A
     # wall with an outline sketch has no miters: angled sides are drawn in it.
-    outlineReplacedProperties = ("length", "extend1", "extend2", "AutoMiter", "minGap",
-                               "maxExtendDist", "miterangle1", "miterangle2")
+    outlineReplacedProperties = ("length", "extend1", "extend2", "gap1", "gap2", "AutoMiter",
+                               "minGap", "maxExtendDist", "miterangle1", "miterangle2")
 
     def onChanged(self, fp, prop):
         if prop == "OutlineSketch":
@@ -2448,6 +2461,70 @@ def smFindNamedConstraint(sketch, name):
     return None
 
 
+def smOutlineBendEnd(sketch, side):
+    """The outline sketch's point marking bend end A or B, as (geometry, position), or None.
+
+    Gap A/B are where these points are. Each is kept on the reference line
+    by a constraint named BendEndA/B (smAddBendEndPoints); a wall whose
+    sketch has lost one fails, saying so.
+    """
+    index = smFindNamedConstraint(sketch, "BendEnd" + side)
+    if index is None:
+        return None
+    constraint = sketch.Constraints[index]
+    return constraint.First, constraint.FirstPos
+
+
+def _smOutlineBendEndFrame(wall, side):
+    """True if bend end A or B is at the outline sketch's left, and the attachment edge's length."""
+    base, edge, _edgeName = smWallAttachmentEdge(wall)
+    backwards = smOutlineSketchReversed(wall.baseObject[1][0], base.Shape)[1]
+    return smSketchSides(backwards, "A", "B")[0] == side, edge.Length
+
+
+def smAddBendEndPoints(sketch, wall):
+    """Add the outline sketch's bend-end points where the wall's gaps put the bend ends.
+
+    Construction points, each kept on the reference line by a constraint
+    named BendEndA/B. Returns their geometry indices as the sketch's (left, right).
+    """
+    import Sketcher
+
+    points = {}
+    for side, gap in (("A", wall.gap1.Value), ("B", wall.gap2.Value)):
+        left, length = _smOutlineBendEndFrame(wall, side)
+        point = sketch.addGeometry(
+            Part.Point(FreeCAD.Vector(gap if left else length - gap, 0, 0)), True)
+        onLine = sketch.addConstraint(Sketcher.Constraint("PointOnObject", point, 1, -1))
+        sketch.renameConstraint(onLine, "BendEnd" + side)
+        points[left] = point
+    return points[True], points[False]
+
+
+def smOutlineSketchGap(wall, side):
+    """Gap A or B where the outline sketch's bend-end point has it, or None without one."""
+    point = smOutlineBendEnd(wall.OutlineSketch, side)
+    if point is None:
+        return None
+    left, length = _smOutlineBendEndFrame(wall, side)
+    x = wall.OutlineSketch.getPoint(*point).x
+    return x if left else length - x
+
+
+def smMoveOutlineBendEnd(wall, side, gap):
+    """Move the outline sketch's bend-end point to give this gap; False without one.
+
+    Sketcher moves the point as its constraints allow, taking along what's
+    tied to it (the side, through Extend).
+    """
+    point = smOutlineBendEnd(wall.OutlineSketch, side)
+    if point is None:
+        return False
+    left, length = _smOutlineBendEndFrame(wall, side)
+    wall.OutlineSketch.moveGeometry(*point, FreeCAD.Vector(gap if left else length - gap, 0, 0))
+    return True
+
+
 def smWallAttachmentEdge(wall):
     """The wall's attachment edge, and its name in the base object."""
     base, subNames = wall.baseObject
@@ -2569,11 +2646,8 @@ def smCreateWallOutlineSketch(wall):
         sketch.renameConstraint(index, label)
         named[label] = index
 
-    # Construction points at the bend ends.
-    point1 = add(Part.Point(V(bend1, 0, 0)), True)
-    point2 = add(Part.Point(V(bend2, 0, 0)), True)
-    con(Sketcher.Constraint("PointOnObject", point1, 1, -1))
-    con(Sketcher.Constraint("PointOnObject", point2, 1, -1))
+    # Construction points at the bend ends: Gap A/B are where they are.
+    point1, point2 = smAddBendEndPoints(sketch, wall)
     name(con(Sketcher.Constraint("DistanceX", -1, 1, point1, 1, bend1)), gapName1)
     farPos = 2 if sketch.getPoint(external, 2).x > sketch.getPoint(external, 1).x else 1
     name(con(Sketcher.Constraint("DistanceX", point2, 1, external, farPos, gap2)), gapName2)
@@ -2849,9 +2923,14 @@ if SheetMetalTools.isGuiLoaded():
             if sketch is not None:
                 for fieldName, dimension in self.outlineFields:
                     index = smFindNamedConstraint(sketch, dimension)
-                    if index is None:
+                    gap = (smOutlineSketchGap(self.obj, dimension[3:])
+                           if dimension.startswith("Gap") else None)
+                    if gap is not None:  # Gap A/B are where the bend-end points are
+                        value = FreeCAD.Units.Quantity(gap, FreeCAD.Units.Length)
+                    elif index is not None:
+                        value = sketch.getDatum(index)
+                    else:
                         continue
-                    value = sketch.getDatum(index)
                     if (fieldName.startswith("extend") and value.Value < smEpsilon
                             and getattr(self.obj, fieldName).Value < 0):
                         continue  # a negative Extend lives on the wall
@@ -2883,6 +2962,8 @@ if SheetMetalTools.isGuiLoaded():
             # defines it and the field can't change it.
             for fieldName, dimension in self.outlineFields:
                 field = getattr(self.form, fieldName)
+                # Gap A/B never gray out: they're where the bend-end points
+                # are, and without the dimension the field moves the point.
                 defined = (sketch is not None and fieldName not in ("gap1", "gap2")
                            and smFindNamedConstraint(sketch, dimension) is None)
                 field.setEnabled(not defined)
@@ -2899,14 +2980,16 @@ if SheetMetalTools.isGuiLoaded():
             sketch = self.obj.OutlineSketch
             if sketch is None:
                 return
-            index = smFindNamedConstraint(sketch, dimension)
-            if index is None:
-                return
             value = field.property("value")
             value = value.Value if hasattr(value, "Value") else float(value)
-            if dimension.startswith("Extend"):
-                value = max(value, 0.0)  # a negative Extend is applied by the wall
-            sketch.setDatum(index, FreeCAD.Units.Quantity(value, FreeCAD.Units.Length))
+            index = smFindNamedConstraint(sketch, dimension)
+            if index is not None:
+                if dimension.startswith("Extend"):
+                    value = max(value, 0.0)  # a negative Extend is applied by the wall
+                sketch.setDatum(index, FreeCAD.Units.Quantity(value, FreeCAD.Units.Length))
+            elif not (dimension.startswith("Gap")
+                      and smMoveOutlineBendEnd(self.obj, dimension[3:], value)):
+                return  # without its dimension, a Gap field moves the bend-end point
             self.obj.Document.recompute()
 
         def editOutline(self):
