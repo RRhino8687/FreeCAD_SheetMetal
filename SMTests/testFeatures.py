@@ -327,7 +327,7 @@ class TestMakeWall(FeatureTestCase):
         """#601: a closed sketch on the plate's edge face builds a valid wall.
 
         Crashed until 9d6bae8. The wall's outline isn't checked here, because
-        this mode is due to be replaced (see the Edit Wall Shape prototype).
+        this mode is due to be replaced (see the Edit Wall Outline prototype).
         """
         thin_face = face_name(self.plate.Shape, lambda f: f.normalAt(0, 0).x > 0.99)
         sketch = self.doc.addObject("Sketcher::SketchObject", "WallOutline")

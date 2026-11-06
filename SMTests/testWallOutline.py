@@ -18,9 +18,9 @@
 #
 # #######################################################################
 
-"""Tests for wall shapes (Edit Shape): a Make Wall wall with a custom outline.
+"""Tests for wall outlines (Edit Outline): a Make Wall wall with a custom outline.
 
-A shape sketch is an open chain drawn in its own 2D frame: x along the
+An outline sketch is an open chain drawn in its own 2D frame: x along the
 attachment edge from its start, y up the wall from the reference line. Closing
 lines join its loose ends to the bend ends, straight in the flat pattern, and
 the bend follows the outline.
@@ -73,9 +73,9 @@ def outline_area(chain, bend_start, bend_end, rise):
     return shoelace([(bend_start, 0.0)] + lifted + [(bend_end, 0.0)])
 
 
-def shape_sketch(doc, points):
-    """An open polyline in the shape sketch's own 2D frame."""
-    sketch = doc.addObject("Sketcher::SketchObject", "Shape")
+def outline_sketch(doc, points):
+    """An open polyline in the outline sketch's own 2D frame."""
+    sketch = doc.addObject("Sketcher::SketchObject", "Outline")
     for start, end in zip(points, points[1:]):
         sketch.addGeometry(Part.LineSegment(Vector(*start, 0), Vector(*end, 0)))
     return sketch
@@ -102,15 +102,15 @@ def upper_part(wall, above=10.0):
     return wall.Shape.common(Part.makeBox(200, 400, 200, Vector(-50, -150, above)))
 
 
-class TestWallShape(FeatureTestCase):
+class TestWallOutline(FeatureTestCase):
 
     def setUp(self):
         super().setUp()
         self.plate = make_plate(self.doc)
 
-    def shaped_wall(self, chain, **props):
+    def outline_wall(self, chain, **props):
         wall = add_wall(self.doc, self.plate, **props)
-        wall.ShapeSketch = shape_sketch(self.doc, chain)
+        wall.OutlineSketch = outline_sketch(self.doc, chain)
         self.doc.recompute()
         return wall
 
@@ -135,7 +135,7 @@ class TestWallShape(FeatureTestCase):
             with self.subTest(label):
                 wall = add_wall(self.doc, self.plate, **props)
                 plain = wall.Shape.copy()
-                sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
+                sketch = SheetMetalCmd.smCreateWallOutlineSketch(wall)
                 self.doc.recompute()
                 self.assertValidSheet(wall)
                 self.assertEqual(sketch.solve(), 0, "starting sketch doesn't solve")
@@ -148,30 +148,30 @@ class TestWallShape(FeatureTestCase):
                 self.assertAlmostEqual(wall.Shape.Volume, plain.Volume, delta=plain.Volume * 1e-4)
 
     def test_making_the_starting_sketch_reports_no_errors(self):
-        """Edit Shape never builds the wall from a half-made sketch."""
+        """Edit Outline never builds the wall from a half-made sketch."""
         errors = []
-        original = SheetMetalCmd.SMWallShape.__init__
+        original = SheetMetalCmd.SMWallOutline.__init__
 
-        def recording(shape, sketch):
+        def recording(outline, sketch):
             try:
-                original(shape, sketch)
+                original(outline, sketch)
             except Exception as error:
                 errors.append(str(error))
                 raise
 
-        SheetMetalCmd.SMWallShape.__init__ = recording
+        SheetMetalCmd.SMWallOutline.__init__ = recording
         try:
             wall = add_wall(self.doc, self.plate, gap1=5.0, extend1=2.0)
-            SheetMetalCmd.smCreateWallShapeSketch(wall)
-            SheetMetalCmd.smRefreshWallShapeTilt(wall)
+            SheetMetalCmd.smCreateWallOutlineSketch(wall)
+            SheetMetalCmd.smRefreshWallOutlineTilt(wall)
             self.doc.recompute()
         finally:
-            SheetMetalCmd.SMWallShape.__init__ = original
+            SheetMetalCmd.SMWallOutline.__init__ = original
         self.assertEqual(errors, [])
         self.assertValidSheet(wall)
 
     def test_panel_values_give_the_plain_wall(self):
-        """Setting Gap A/B and Extend A/B on a shaped wall, as the task panel
+        """Setting Gap A/B and Extend A/B on a wall with an outline sketch, as the task panel
         does, gives exactly the wall Make Wall makes with the same values.
 
         A negative Extend is set on the wall only; the wall applies it where
@@ -191,7 +191,7 @@ class TestWallShape(FeatureTestCase):
             with self.subTest(values=values, spec=spec):
                 plain = add_wall(self.doc, self.plate, LengthSpec=spec, **values).Shape
                 wall = add_wall(self.doc, self.plate, LengthSpec=spec)
-                sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
+                sketch = SheetMetalCmd.smCreateWallOutlineSketch(wall)
                 for prop, value in values.items():
                     setattr(wall, prop, value)
                     if prop in fields:
@@ -226,7 +226,7 @@ class TestWallShape(FeatureTestCase):
                     base = dict(start, LengthSpec="Outer Sharp")
                     plain = add_wall(self.doc, self.plate, **dict(base, **change)).Shape
                     wall = add_wall(self.doc, self.plate, **base)
-                    sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
+                    sketch = SheetMetalCmd.smCreateWallOutlineSketch(wall)
                     for prop, value in change.items():
                         setattr(wall, prop, value)
                         if prop == "length":  # the task panel also edits the sketch's Length
@@ -237,15 +237,15 @@ class TestWallShape(FeatureTestCase):
                     self.assertLess(plain.cut(wall.Shape).Volume + wall.Shape.cut(plain).Volume, 0.01)
                     self.assertEqual(len(wall.Shape.Faces), len(plain.Faces), "face count")
 
-    def test_shaped_walls_have_no_miters(self):
-        """A shaped wall ignores its miter settings: angled sides are drawn in
-        the sketch. Edit Shape isn't offered while a wall has miters, so it
+    def test_outline_walls_have_no_miters(self):
+        """A wall with an outline sketch ignores its miter settings: angled sides are drawn in
+        the sketch. Edit Outline isn't offered while a wall has miters, so it
         never changes the wall."""
         tee = [(0, 0), (0, 10), (-10, 10), (-10, 20), (110, 20), (110, 10), (100, 10), (100, 0)]
-        unmitered = self.shaped_wall(tee).Shape.Volume
+        unmitered = self.outline_wall(tee).Shape.Volume
         for angle in (10.0, -10.0):
             with self.subTest(f"miter angles of {angle} are ignored"):
-                wall = self.shaped_wall(tee, AutoMiter=False, miterangle1=angle, miterangle2=angle)
+                wall = self.outline_wall(tee, AutoMiter=False, miterangle1=angle, miterangle2=angle)
                 self.assertValidSheet(wall)
                 self.assertAlmostEqual(wall.Shape.Volume, unmitered, delta=0.01)
                 self.assertEqual(wall.getEditorMode("miterangle1"), ["Hidden"])
@@ -258,17 +258,17 @@ class TestWallShape(FeatureTestCase):
         for label, props, refused in cases:
             with self.subTest(label):
                 wall = add_wall(self.doc, self.plate, **props)
-                reason = SheetMetalCmd.smWallShapeUnavailableReason(wall)
+                reason = SheetMetalCmd.smWallOutlineUnavailableReason(wall)
                 self.assertEqual("no miters" in reason, refused, reason)
 
     def test_starting_sketch_stands_on_the_wall(self):
-        """Edit Shape shows the sketch on the wall's flat part (ADR 0001)."""
+        """Edit Outline shows the sketch on the wall's flat part (ADR 0001)."""
         for label, props in [("90", {}), ("45", {"angle": 45.0}), ("135", {"angle": 135.0}),
                              ("Invert", {"invert": True}),
                              ("Outer Sharp", {"LengthSpec": "Outer Sharp"})]:
             with self.subTest(label):
                 wall = add_wall(self.doc, self.plate, **props)
-                sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
+                sketch = SheetMetalCmd.smCreateWallOutlineSketch(wall)
                 top = max(sketch.Shape.Edges,
                           key=lambda e: e.CenterOfMass.distanceToPoint(self.plate.Shape.CenterOfMass))
                 self.assertLess(wall.Shape.distToShape(Part.Vertex(top.CenterOfMass))[0], 1e-6)
@@ -293,26 +293,26 @@ class TestWallShape(FeatureTestCase):
         for label, edge, props, expected in cases:
             with self.subTest(label):
                 wall = add_wall(self.doc, self.plate, edge=edge, **props)
-                sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
+                sketch = SheetMetalCmd.smCreateWallOutlineSketch(wall)
                 normal = sketch.getGlobalPlacement().Rotation.multVec(Vector(0, 0, 1))
                 self.assertGreater(normal.dot(Vector(*expected)), 0.999, f"normal {normal}")
                 self.assertEqual(sketch.solve(), 0)
                 self.assertValidSheet(wall)
 
     def test_stale_frame_from_an_older_file(self):
-        """Edit Shape uses the wall as it is now, not the frame a file stored.
+        """Edit Outline uses the wall as it is now, not the frame a file stored.
 
         A wall loaded from a file isn't recomputed until something changes,
         so its stored frame can come from older code.
         """
         wall = add_wall(self.doc, self.plate)
         stale = FreeCAD.Placement(Vector(0, 0, 0), FreeCAD.Rotation(Vector(0, 0, 1), 180))
-        wall.ShapeFrame = stale
-        sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
+        wall.OutlineFrame = stale
+        sketch = SheetMetalCmd.smCreateWallOutlineSketch(wall)
         normal = sketch.getGlobalPlacement().Rotation.multVec(Vector(0, 0, 1))
         self.assertGreater(normal.dot(Vector(1, 0, 0)), 0.999, f"normal {normal}")
-        wall.ShapeFrame = stale
-        SheetMetalCmd.smRefreshWallShapeTilt(wall)
+        wall.OutlineFrame = stale
+        SheetMetalCmd.smRefreshWallOutlineTilt(wall)
         self.doc.recompute()
         normal = sketch.getGlobalPlacement().Rotation.multVec(Vector(0, 0, 1))
         self.assertGreater(normal.dot(Vector(1, 0, 0)), 0.999, f"after refresh {normal}")
@@ -323,11 +323,11 @@ class TestWallShape(FeatureTestCase):
         The sketch's direction along the edge doesn't depend on Invert.
         """
         wall = add_wall(self.doc, self.plate, gap1=5.0, gap2=20.0)
-        sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
+        sketch = SheetMetalCmd.smCreateWallOutlineSketch(wall)
         before = upper_part(wall).BoundBox
         wall.invert = True
         self.doc.recompute()
-        SheetMetalCmd.smRefreshWallShapeTilt(wall)
+        SheetMetalCmd.smRefreshWallOutlineTilt(wall)
         self.doc.recompute()
         self.assertValidSheet(wall)
         self.assertEqual(sketch.solve(), 0)
@@ -362,16 +362,16 @@ class TestWallShape(FeatureTestCase):
                 setback = outer if props.get("LengthSpec") == "Outer Sharp" else 0.0
                 if chain is None:
                     wall = add_wall(self.doc, self.plate, **props)
-                    sketch = self.doc.addObject("Sketcher::SketchObject", "Shape")
+                    sketch = self.doc.addObject("Sketcher::SketchObject", "Outline")
                     sketch.addGeometry(Part.LineSegment(Vector(0, 0, 0), Vector(0, 10, 0)))
                     sketch.addGeometry(Part.ArcOfCircle(
                         Part.Circle(Vector(50, 10, 0), Vector(0, 0, 1), 50), 0, math.pi))
                     sketch.addGeometry(Part.LineSegment(Vector(100, 10, 0), Vector(100, 0, 0)))
-                    wall.ShapeSketch = sketch
+                    wall.OutlineSketch = sketch
                     self.doc.recompute()
                     area = 100 * (10 + ba - setback) + math.pi * 50 ** 2 / 2
                 else:
-                    wall = self.shaped_wall(chain, **props)
+                    wall = self.outline_wall(chain, **props)
                     area = outline_area(chain, *span, ba - setback)
                 self.assertValidSheet(wall)
                 expected = PLATE_VOLUME + area * THK - reliefs * RELIEF_VOLUME
@@ -379,7 +379,7 @@ class TestWallShape(FeatureTestCase):
 
     def assertFlatOutline(self, chain, span, reliefs, old_unfolder):
         ba = bend_allowance()
-        wall = self.shaped_wall(chain)
+        wall = self.outline_wall(chain)
         flat = unfold(self.doc, wall, old_unfolder)
         self.assertValidSheet(flat)
         expected = PLATE_VOLUME + outline_area(chain, *span, ba) * THK - reliefs * RELIEF_VOLUME
@@ -389,7 +389,7 @@ class TestWallShape(FeatureTestCase):
         self.assertAlmostEqual(flat.Shape.BoundBox.XLength, PLATE_W + ba + top, places=2)
 
     def test_unfolders_give_the_outline(self):
-        """Unfolding a shaped wall gives the plate plus the outline, flat.
+        """Unfolding a wall with an outline sketch gives the plate plus the outline, flat.
 
         The old unfolder is only checked on square bend ends: see
         test_old_unfolder_angled_bend_ends.
@@ -415,7 +415,7 @@ class TestWallShape(FeatureTestCase):
         chain = [(0, 0), (0, 20), (80, 20), (80, 12), (100, 12), (100, 0)]
         for angle in (45.0, 90.0, 135.0):
             with self.subTest(angle=angle):
-                wall = self.shaped_wall(chain, angle=angle)
+                wall = self.outline_wall(chain, angle=angle)
                 flat = unfold(self.doc, wall, False)
                 ba = bend_allowance(angle)
                 expected = PLATE_VOLUME + outline_area(chain, 0, 100, ba) * THK
@@ -423,10 +423,10 @@ class TestWallShape(FeatureTestCase):
                 self.assertAlmostEqual(flat.Shape.BoundBox.XLength, PLATE_W + ba + 20, places=2)
 
     def test_outer_sharp_height_ignores_the_radius(self):
-        """With Outer Sharp the shape's height is measured from the edge line."""
+        """With Outer Sharp the outline's height is measured from the edge line."""
         tops = []
         for radius in (1.0, 3.0):
-            wall = self.shaped_wall([(0, 0), (0, 20), (100, 20), (100, 0)],
+            wall = self.outline_wall([(0, 0), (0, 20), (100, 20), (100, 0)],
                                     LengthSpec="Outer Sharp", radius=radius)
             self.assertValidSheet(wall)
             tops.append(wall.Shape.BoundBox.ZMax)
@@ -446,10 +446,10 @@ class TestWallShape(FeatureTestCase):
              [(-5, 12), (-5, 20), (80, 20), (80, 12), (100, 12), (100, 0)]),
         ]
         for label, chain in chains:
-            leg = len(self.shaped_wall(chain).Shape.Faces)
+            leg = len(self.outline_wall(chain).Shape.Faces)
             for spec in ("Outer Sharp", "Inner Sharp", "Tangential"):
                 with self.subTest(label, LengthSpec=spec):
-                    wall = self.shaped_wall(chain, LengthSpec=spec)
+                    wall = self.outline_wall(chain, LengthSpec=spec)
                     self.assertValidSheet(wall)
                     self.assertEqual(len(wall.Shape.Faces), leg, "face count")
 
@@ -466,10 +466,10 @@ class TestWallShape(FeatureTestCase):
             ("slant", [(-3, 0), (-10, 0.5), (-10, 20), (100, 20), (100, 0)]),
         ]
         for spec in ("Outer Sharp", "Inner Sharp", "Tangential"):
-            plain = self.shaped_wall(simple, LengthSpec=spec).Shape
+            plain = self.outline_wall(simple, LengthSpec=spec).Shape
             for label, chain in variants:
                 with self.subTest(label, LengthSpec=spec):
-                    wall = self.shaped_wall(chain, LengthSpec=spec)
+                    wall = self.outline_wall(chain, LengthSpec=spec)
                     self.assertValidSheet(wall)
                     self.assertLess(plain.cut(wall.Shape).Volume + wall.Shape.cut(plain).Volume,
                                     0.01)
@@ -478,7 +478,7 @@ class TestWallShape(FeatureTestCase):
     def test_wall_follows_a_shorter_edge(self):
         """The starting sketch's right side follows the far end of the edge (Q16)."""
         wall = add_wall(self.doc, self.plate, gap2=5.0, extend2=2.0)
-        SheetMetalCmd.smCreateWallShapeSketch(wall)
+        SheetMetalCmd.smCreateWallOutlineSketch(wall)
         sketch = self.plate.BendSketch
         short = PLATE_L - 20
         sketch.moveGeometry(1, 2, Vector(PLATE_W, short, 0))
@@ -492,7 +492,7 @@ class TestWallShape(FeatureTestCase):
     def test_gap_moves_bend_end_and_side_together(self):
         """Changing Gap 1 and the sketch's Gap1 keeps Extend 1 (Q17)."""
         wall = add_wall(self.doc, self.plate, gap1=4.0, extend1=1.0)
-        sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
+        sketch = SheetMetalCmd.smCreateWallOutlineSketch(wall)
         wall.gap1 = 10.0
         sketch.setDatum(SheetMetalCmd.smFindNamedConstraint(sketch, "GapA"),
                         FreeCAD.Units.Quantity(10.0, FreeCAD.Units.Length))
@@ -519,7 +519,7 @@ class TestWallShape(FeatureTestCase):
         for label, side, edit, removed in cases:
             with self.subTest(label):
                 wall = add_wall(self.doc, self.plate)
-                sketch = SheetMetalCmd.smCreateWallShapeSketch(wall)
+                sketch = SheetMetalCmd.smCreateWallOutlineSketch(wall)
 
                 def at(x, y):
                     """A point measured inwards from the corner on this side."""
@@ -554,26 +554,26 @@ class TestWallShape(FeatureTestCase):
     def test_removing_the_sketch_gives_the_plain_wall_back(self):
         wall = add_wall(self.doc, self.plate)
         plain_volume = wall.Shape.Volume
-        sketch = shape_sketch(self.doc, [(30, 0), (30, 15), (70, 15), (70, 0)])
-        wall.ShapeSketch = sketch
+        sketch = outline_sketch(self.doc, [(30, 0), (30, 15), (70, 15), (70, 0)])
+        wall.OutlineSketch = sketch
         self.doc.recompute()
         self.assertNotAlmostEqual(wall.Shape.Volume, plain_volume, places=0)
         self.doc.removeObject(sketch.Name)
         self.doc.recompute()
-        self.assertIsNone(wall.ShapeSketch)
+        self.assertIsNone(wall.OutlineSketch)
         self.assertAlmostEqual(wall.Shape.Volume, plain_volume, places=3)
         self.assertEqual(wall.getEditorMode("length"), [])
 
-    def test_perforated_shape(self):
-        """Perforation still cuts the bend of a shaped wall (Q20)."""
+    def test_perforated_outline(self):
+        """Perforation still cuts the bend of a wall with an outline sketch (Q20)."""
         chain = [(30, 0), (30, 15), (70, 15), (70, 0)]
-        solid = self.shaped_wall(chain).Shape.Volume
-        wall = self.shaped_wall(chain, Perforate=True)
+        solid = self.outline_wall(chain).Shape.Volume
+        wall = self.outline_wall(chain, Perforate=True)
         self.assertValidSheet(wall)
         self.assertLess(wall.Shape.Volume, solid - 1.0)
 
     def test_errors(self):
-        """Bad shape sketches fail with a clear message, not a traceback."""
+        """Bad outline sketches fail with a clear message, not a traceback."""
         cases = [
             ("closed", [(0, 0), (0, 10), (100, 10), (100, 0), (0, 0)], {}, "must be open"),
             ("dips onto the sheet", [(0, 0), (0, 10), (50, -2), (100, 10), (100, 0)], {},
@@ -588,14 +588,14 @@ class TestWallShape(FeatureTestCase):
         ]
         for label, chain, props, message in cases:
             with self.subTest(label):
-                wall = self.shaped_wall(chain, **props)
+                wall = self.outline_wall(chain, **props)
                 self.assertIn("Invalid", wall.State)
                 self.assertIn(message, wall.getStatusString())
         with self.subTest("two pieces"):
             wall = add_wall(self.doc, self.plate)
-            sketch = shape_sketch(self.doc, [(0, 0), (0, 10)])
+            sketch = outline_sketch(self.doc, [(0, 0), (0, 10)])
             sketch.addGeometry(Part.LineSegment(Vector(100, 0, 0), Vector(100, 10, 0)))
-            wall.ShapeSketch = sketch
+            wall.OutlineSketch = sketch
             self.doc.recompute()
             self.assertIn("one connected chain", wall.getStatusString())
         with self.subTest("wall on two edges"):
@@ -605,7 +605,7 @@ class TestWallShape(FeatureTestCase):
                 edge_name(self.plate.Shape, (PLATE_W, 0, THK), (PLATE_W, PLATE_L, THK)),
                 edge_name(self.plate.Shape, (0, 0, THK), (0, PLATE_L, THK))])
             self.doc.recompute()
-            self.assertIn("one edge", SheetMetalCmd.smWallShapeUnavailableReason(wall))
-            wall.ShapeSketch = shape_sketch(self.doc, [(0, 0), (0, 10), (100, 10), (100, 0)])
+            self.assertIn("one edge", SheetMetalCmd.smWallOutlineUnavailableReason(wall))
+            wall.OutlineSketch = outline_sketch(self.doc, [(0, 0), (0, 10), (100, 10), (100, 0)])
             self.doc.recompute()
             self.assertIn("exactly one edge", wall.getStatusString())
