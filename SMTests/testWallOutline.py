@@ -655,7 +655,8 @@ class TestWallOutline(FeatureTestCase):
                 wall = self.outline_wall(chain, **props)
                 self.assertIn("Invalid", wall.State)
                 self.assertIn(message, wall.getStatusString())
-        missing = "needs its two bend-end points"
+        missing = "(Gap A) is missing from the outline sketch"
+        off_line = "(Gap A) is no longer held on the outline sketch's reference line"
         with self.subTest("bend-end point deleted"):
             wall = add_wall(self.doc, self.plate)
             sketch = SheetMetalCmd.smCreateWallOutlineSketch(wall)
@@ -663,6 +664,14 @@ class TestWallOutline(FeatureTestCase):
             self.doc.recompute()
             self.assertIn(missing, wall.getStatusString())
             self.assertFalse(SheetMetalCmd.smMoveOutlineBendEnd(wall, "A", 5.0))
+        for kept, deleted in (("GapA", "ExtendA"), ("ExtendA", "GapA")):
+            with self.subTest("bend-end point let off the line", kept=kept):
+                wall = add_wall(self.doc, self.plate)
+                sketch = SheetMetalCmd.smCreateWallOutlineSketch(wall)
+                for name in ("BendEndA", deleted):
+                    sketch.delConstraint(SheetMetalCmd.smFindNamedConstraint(sketch, name))
+                self.doc.recompute()
+                self.assertIn(off_line, wall.getStatusString())
         with self.subTest("sketch without bend-end points"):
             wall = add_wall(self.doc, self.plate)
             wall.OutlineSketch = outline_sketch(self.doc, [(0, 0), (0, 10), (100, 10), (100, 0)])

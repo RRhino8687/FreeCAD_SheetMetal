@@ -1330,11 +1330,7 @@ class SMWallOutline:
         for side in ("A", "B"):
             point = smOutlineBendEnd(sketch, side)
             if point is None:
-                raise SheetMetalTools.SMException(translate(
-                    "SheetMetal",
-                    "The outline sketch needs its two bend-end points: the construction points "
-                    "kept on the reference line by BendEndA and BendEndB. Undo deleting them, "
-                    "or start a new sketch with Remove Outline and Edit Outline."))
+                raise SheetMetalTools.SMException(smMissingBendEndMessage(sketch, side))
             self.bendEnds[side] = sketch.getPoint(*point).x
 
     def bendSpan(self, sides):
@@ -2473,6 +2469,33 @@ def smOutlineBendEnd(sketch, side):
         return None
     constraint = sketch.Constraints[index]
     return constraint.First, constraint.FirstPos
+
+
+def smMissingBendEndMessage(sketch, side):
+    """Why the outline sketch has no bend-end point for this side.
+
+    Either the point is gone, or it's still there (its Gap or Extend
+    dimension uses it) but the BendEnd constraint holding it on the
+    reference line was deleted, so it may have moved off the line.
+    """
+    for name in ("Gap" + side, "Extend" + side):
+        index = smFindNamedConstraint(sketch, name)
+        if index is None:
+            continue
+        constraint = sketch.Constraints[index]
+        if any(geo >= 0 and isinstance(sketch.Geometry[geo], Part.Point)
+               for geo in (constraint.First, constraint.Second)):
+            return translate(
+                "SheetMetal",
+                "The point for bend end {0} (Gap {0}) is no longer held on the outline "
+                "sketch's reference line, because its BendEnd{0} constraint was deleted. Undo "
+                "deleting the constraint, or start a new sketch with Remove Outline and "
+                "Edit Outline.").format(side)
+    return translate(
+        "SheetMetal",
+        "The point for bend end {0} (Gap {0}) is missing from the outline sketch, and Edit "
+        "Outline needs it. Undo deleting it, or start a new sketch with Remove Outline and "
+        "Edit Outline.").format(side)
 
 
 def _smOutlineBendEndFrame(wall, side):
