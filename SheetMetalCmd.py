@@ -2927,6 +2927,9 @@ if SheetMetalTools.isGuiLoaded():
         # Fields the starting outline sketch has a dimension for.
         outlineFields = (("Length", "Length"), ("extend1", "ExtendA"), ("extend2", "ExtendB"),
                        ("gap1", "GapA"), ("gap2", "GapB"))
+        # What a field goes back to once its dimension is deleted from the
+        # sketch: Make Wall's defaults. (Gap A/B are where the bend-end points are.)
+        outlineFieldDefaults = {"Length": 10.0, "ExtendA": 0.0, "ExtendB": 0.0}
 
         def setupOutlineWidgets(self):
             box = QtGui.QGroupBox(translate("SheetMetal", "Wall outline"))
@@ -2941,7 +2944,8 @@ if SheetMetalTools.isGuiLoaded():
                 lambda: QtCore.QTimer.singleShot(0, self.editOutline))
             self.removeOutlineButton.clicked.connect(self.removeOutline)
             # The sketch may have been edited since: show its dimensions,
-            # which also copies them into the wall's own properties.
+            # which also copies them into the wall's own properties. A field
+            # whose dimension was deleted goes back to its default.
             sketch = self.obj.OutlineSketch
             if sketch is not None:
                 for fieldName, dimension in self.outlineFields:
@@ -2949,15 +2953,18 @@ if SheetMetalTools.isGuiLoaded():
                     gap = (smOutlineSketchGap(self.obj, dimension[3:])
                            if dimension.startswith("Gap") else None)
                     if gap is not None:  # Gap A/B are where the bend-end points are
-                        value = FreeCAD.Units.Quantity(gap, FreeCAD.Units.Length)
+                        value = gap
                     elif index is not None:
-                        value = sketch.getDatum(index)
+                        value = sketch.getDatum(index).Value
+                        if (fieldName.startswith("extend") and value < smEpsilon
+                                and getattr(self.obj, fieldName).Value < 0):
+                            continue  # a negative Extend lives on the wall
+                    elif dimension in self.outlineFieldDefaults:
+                        value = self.outlineFieldDefaults[dimension]
                     else:
                         continue
-                    if (fieldName.startswith("extend") and value.Value < smEpsilon
-                            and getattr(self.obj, fieldName).Value < 0):
-                        continue  # a negative Extend lives on the wall
-                    getattr(self.form, fieldName).setProperty("value", value)
+                    getattr(self.form, fieldName).setProperty(
+                        "value", FreeCAD.Units.Quantity(value, FreeCAD.Units.Length))
             self.outlineFieldTips = {}
             for fieldName, dimension in self.outlineFields:
                 field = getattr(self.form, fieldName)
