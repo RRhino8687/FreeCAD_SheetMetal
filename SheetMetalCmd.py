@@ -2684,11 +2684,41 @@ if SheetMetalTools.isGuiLoaded():
 
 
     class _WallOutlineEditObserver:
-        """Brings Make Wall's task panel back when Sketcher closes."""
+        """While the outline sketch is edited: shows it from the outside of the
+        bend, and brings Make Wall's task panel back when Sketcher closes.
+
+        Create it just before opening Sketcher.
+        """
 
         def __init__(self, wall, sketch):
             self.wall, self.sketch = wall, sketch
+            self.cameraSensor = None
+            if smOutlineFacesInside(wall):
+                # Sketcher starts turning the camera to face the sketch, which
+                # faces the inside of the bend, and keeps animating while it
+                # zooms to fit, before setEdit returns. Take over at the first
+                # step of that turn (or once editing starts, if nothing moved).
+                from pivy import coin
+                self.cameraSensor = coin.SoFieldSensor(
+                    lambda _data, _sensor: self.lookFromOutside(), None)
+                self.cameraSensor.attach(Gui.ActiveDocument.ActiveView.getCameraNode().orientation)
             Gui.addDocumentObserver(self)
+
+        def lookFromOutside(self):
+            """Turn the camera around the sketch's y-axis to look from the outside
+            of the bend. The sketch doesn't change; seen from there its x-axis
+            runs right to left."""
+            if self.cameraSensor is None:
+                return
+            self.cameraSensor.detach()
+            self.cameraSensor = None
+            behind = self.sketch.getGlobalPlacement().Rotation.multiply(
+                FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 180))
+            Gui.ActiveDocument.ActiveView.setCameraOrientation(behind)
+
+        def slotInEdit(self, viewObject):
+            if viewObject.Object == self.sketch:
+                self.lookFromOutside()
 
         def slotResetEdit(self, viewObject):
             if viewObject.Object == self.sketch:
@@ -2716,15 +2746,6 @@ if SheetMetalTools.isGuiLoaded():
         sketch.ViewObject.Visibility = True
         _WallOutlineEditObserver(wall, sketch)
         Gui.ActiveDocument.setEdit(sketch, 0)
-        if smOutlineFacesInside(wall):
-            # Sketcher has just turned the camera to face the sketch, which
-            # faces the inside of the bend. Before anything is drawn, turn it
-            # around the sketch's y-axis instead, to look from the outside;
-            # this replaces Sketcher's turn, so the view never shows the
-            # inside. The sketch doesn't change; its x-axis runs right to left.
-            behind = sketch.getGlobalPlacement().Rotation.multiply(
-                FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 180))
-            Gui.ActiveDocument.ActiveView.setCameraOrientation(behind)
 
 
     class SMViewProviderFlat(SMViewProviderTree):
