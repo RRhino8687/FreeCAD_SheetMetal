@@ -453,6 +453,28 @@ class TestWallShape(FeatureTestCase):
                     self.assertValidSheet(wall)
                     self.assertEqual(len(wall.Shape.Faces), leg, "face count")
 
+    def test_flat_part_steps_out_past_a_bend_end(self):
+        """A loose end on the reference line past a bend end keeps that bend end
+        square: outside it, nothing below where the flat part starts is kept,
+        whatever the sketch does down there (ADR 0002).
+
+        With a setback, these chains turn below where the flat part starts.
+        """
+        simple = [(-10, 0), (-10, 20), (100, 20), (100, 0)]
+        variants = [
+            ("notch", [(-3, 0), (-3, 0.5), (-10, 0.5), (-10, 20), (100, 20), (100, 0)]),
+            ("slant", [(-3, 0), (-10, 0.5), (-10, 20), (100, 20), (100, 0)]),
+        ]
+        for spec in ("Outer Sharp", "Inner Sharp", "Tangential"):
+            plain = self.shaped_wall(simple, LengthSpec=spec).Shape
+            for label, chain in variants:
+                with self.subTest(label, LengthSpec=spec):
+                    wall = self.shaped_wall(chain, LengthSpec=spec)
+                    self.assertValidSheet(wall)
+                    self.assertLess(plain.cut(wall.Shape).Volume + wall.Shape.cut(plain).Volume,
+                                    0.01)
+                    self.assertEqual(len(wall.Shape.Faces), len(plain.Faces), "face count")
+
     def test_wall_follows_a_shorter_edge(self):
         """The starting sketch's right side follows the far end of the edge (Q16)."""
         wall = add_wall(self.doc, self.plate, gap2=5.0, extend2=2.0)
