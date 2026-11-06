@@ -299,6 +299,28 @@ class TestWallOutline(FeatureTestCase):
                 self.assertEqual(sketch.solve(), 0)
                 self.assertValidSheet(wall)
 
+    def test_knows_when_the_sketch_faces_the_inside(self):
+        """Invert or a negative angle (but not both) leaves the sketch facing the
+        inside of the bend. Edit Outline then turns the camera around, so the
+        outline is always edited from the outside.
+        """
+        cases = [{}, {"invert": True}, {"angle": -90.0}, {"invert": True, "angle": -90.0},
+                 {"angle": 45.0, "invert": True}, {"angle": -135.0},
+                 {"edge": ((PLATE_W, 0, 0), (PLATE_W, PLATE_L, 0)), "invert": True}]
+        for props in cases:
+            with self.subTest(**{k: v for k, v in props.items() if k != "edge"},
+                              bottom_edge="edge" in props):
+                wall = add_wall(self.doc, self.plate, **props)
+                placement = SheetMetalCmd.smCreateWallOutlineSketch(wall).getGlobalPlacement()
+                bend = next(f.Surface for f in wall.Shape.Faces
+                            if isinstance(f.Surface, Part.Cylinder))
+                # The sketch's plane is on the side of the bend axis away from
+                # the bend's center; Sketcher looks from the sketch's +z side.
+                offset = placement.Base - bend.Center
+                normal = placement.Rotation.multVec(Vector(0, 0, 1))
+                faces_inside = normal.dot(offset) < 0
+                self.assertEqual(SheetMetalCmd.smOutlineFacesInside(wall), faces_inside)
+
     def test_stale_frame_from_an_older_file(self):
         """Edit Outline uses the wall as it is now, not the frame a file stored.
 

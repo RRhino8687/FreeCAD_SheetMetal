@@ -1268,7 +1268,8 @@ def smOutlineSketchReversed(selItemName, MainObject):
     must be that normal x outside to stay right-handed.
 
     Invert and a negative angle don't change this, so they never mirror an
-    existing sketch; they only show it from the inside.
+    existing sketch; they only leave it facing the inside of the bend, and
+    Edit Outline then looks at it from behind (smOutlineFacesInside).
     """
     edge, selFace, _thk, _axis, thkDir = smEdge(selItemName, MainObject)
     pickedEdge = thkDir is not None
@@ -2429,6 +2430,16 @@ def smWallOutlineUnavailableReason(wall):
     return ""
 
 
+def smOutlineFacesInside(wall):
+    """True if the outline sketch faces the inside of the bend.
+
+    Invert and a negative angle each turn the wall to the other side of the
+    sheet without turning the sketch (smOutlineSketchReversed); together they
+    cancel out.
+    """
+    return wall.invert != (wall.angle.Value < 0)
+
+
 def smFindNamedConstraint(sketch, name):
     """Index of the sketch constraint with this name, or None."""
     for i, constraint in enumerate(sketch.Constraints):
@@ -2705,6 +2716,14 @@ if SheetMetalTools.isGuiLoaded():
         sketch.ViewObject.Visibility = True
         _WallOutlineEditObserver(wall, sketch)
         Gui.ActiveDocument.setEdit(sketch, 0)
+        if smOutlineFacesInside(wall):
+            # Sketcher looks at the sketch from the inside of the bend: turn
+            # the camera around the sketch's y-axis to look from the outside.
+            # The sketch doesn't change; its x-axis just runs right to left.
+            behind = sketch.getGlobalPlacement().Rotation.multiply(
+                FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 180))
+            QtCore.QTimer.singleShot(
+                0, lambda: Gui.ActiveDocument.ActiveView.setCameraOrientation(behind))
 
 
     class SMViewProviderFlat(SMViewProviderTree):
